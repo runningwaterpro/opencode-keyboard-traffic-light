@@ -22,6 +22,11 @@ def main(argv: list[str] | None = None) -> int:
         help="service.json 路径（默认读用户目录 .local/state/opencode/service.json；环境变量 KTL_SERVICE_JSON 同效）",
     )
     parser.add_argument("--verbose", "-v", action="store_true", help="输出 debug 日志")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="干跑：只写日志，不碰键盘、不发通知",
+    )
     args = parser.parse_args(argv)
 
     service_json = args.service_json
@@ -32,7 +37,7 @@ def main(argv: list[str] | None = None) -> int:
     if service_json is None:
         service_json = DEFAULT_SERVICE_JSON
 
-    return run(service_json=service_json, verbose=args.verbose)
+    return run(service_json=service_json, verbose=args.verbose, dry_run=args.dry_run)
 
 
 if __name__ == "__main__":

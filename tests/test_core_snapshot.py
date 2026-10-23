@@ -19,7 +19,7 @@ def test_rebuild_adds_running_and_pending():
     st = GuardState()
     eff = apply_snapshot(st, snap([S("ses_r", running=True),
                                    S("ses_w", pending={"prq_1": "permission"})]), T0)
-    assert eff == [SetKeyLight("1", Light.WAITING)]
+    assert eff == [SetKeyLight("1", Light.RUNNING), SetKeyLight("2", Light.WAITING)]
     assert st.sessions["ses_r"].running is True
     assert st.sessions["ses_w"].pending == {"prq_1": "permission"}
     assert st.sessions["ses_w"].waiting_visible_until == T0 + 500

@@ -5,7 +5,7 @@
 """
 from pathlib import Path
 
-from traffic_light.core import GuardState, Light, apply_event, parse_event, tick
+from traffic_light.core import GuardState, Light, SetKeyLight, apply_event, parse_event, tick
 from traffic_light.sse import parse_sse_lines
 
 FIXTURE = Path(__file__).parent / "fixtures" / "replay-sample.jsonl"
@@ -38,10 +38,15 @@ def replay_fixture():
     return state, last_ms, effects_log
 
 
+def set_lights(effects):
+    """效果现为混合列表（灯态+通知）：只挑 SetKeyLight 灯态效果。"""
+    return [e for e in effects if isinstance(e, SetKeyLight)]
+
+
 def test_replay_never_emits_failed():
     # user 中断、表单取消必须静默：整个回放不出现红灯
     _, _, effects_log = replay_fixture()
-    assert all(e.light is not Light.FAILED for eff in effects_log for e in eff)
+    assert all(e.light is not Light.FAILED for eff in effects_log for e in set_lights(eff))
 
 
 def test_replay_final_session_states():
@@ -54,7 +59,7 @@ def test_replay_final_session_states():
 def test_replay_tick_after_last_frame_keeps_running_display():
     state, last_ms, _ = replay_fixture()
     effects = tick(state, last_ms + 1000)
-    assert all(e.light is not Light.FAILED for e in effects)
+    assert all(e.light is not Light.FAILED for e in set_lights(effects))
     assert state.display is Light.RUNNING
 
 

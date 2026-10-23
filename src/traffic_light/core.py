@@ -1,17 +1,21 @@
-"""纯核心状态机（主缝）：OpenCode 事件 → 灯态与效果。
+"""纯核心状态机（主缝）：OpenCode 事件 → 灯态 / 槽位 / 通知效果。
 
 无 I/O、无时间源：调用方传入 now_ms（毫秒），保证离线可测、可回放。
-灯态：执行中=紫、失败=红、等待=黄（呼吸）、空闲=绿；无会话=灭。
-等待保底可见 WAITING_MIN_VISIBLE_MS；失败保持到该会话下次开跑或成功（ADR-0002）。
+- 灯态：执行中=紫、失败=红、等待=黄（呼吸）、空闲=绿；无会话=灭。
+- 槽位（ADR-0003）：会话第一次出现占最小空号（1→…→9→0），已占不重排；
+  归档/删除释放；满时先淘汰最久空闲 → 最早的失败 → 否则等待；子会话不占号。
+- 通知（票⑥）：四类触发 + 静默规则，见 apply_event 内注释。
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from enum import Enum
 
 WAITING_MIN_VISIBLE_MS = 500
-AGGREGATE_KEY = "1"
 FAILED_REASONS = ("shutdown", "inactivity")
+SLOT_KEYS = ("1", "2", "3", "4", "5", "6", "7", "8", "9", "0")
+COMPLETION_MIN_RUN_MS = 5000
 
 
 class Light(Enum):
@@ -31,6 +35,17 @@ class SetKeyLight:
     light: Light
 
 
+@dataclass(frozen=True)
+class Notify:
+    """通知效果（由通知口渲染成 toast；字段与 notify.NotifyRequest 对齐）。"""
+    kind: str  # "permission" | "question" | "completed" | "failed" | "interrupted"
+    session_id: str | None = None
+    slot: str | None = None
+    title: str | None = None
+    project: str | None = None
+    detail: str | None = None
+
+
 @dataclass
 class SessionState:
     session_id: str
@@ -41,6 +56,13 @@ class SessionState:
     failed: bool = False
     pending: dict[str, str] = field(default_factory=dict)
     waiting_visible_until: int = 0
+    slot: str | None = None
+    first_seen_ms: int = 0
+    run_started_ms: int | None = None
+    completion_pending: bool = False
+    idle_since_ms: int | None = None
+    failed_since_ms: int | None = None
+    wait_slot: bool = False
 
     def light(self, now_ms: int) -> Light:
         if self.pending or now_ms < self.waiting_visible_until:
@@ -52,53 +74,273 @@ class SessionState:
         return Light.IDLE
 
 
+def project_name(directory: str | None) -> str | None:
+    """项目名 = 目录的文件夹名。"""
+    if not directory:
+        return None
+    name = os.path.basename(directory.rstrip("\\/"))
+    return name or None
+
 @dataclass
 class GuardState:
     sessions: dict[str, SessionState] = field(default_factory=dict)
-    display: Light = Light.OFF
-    gone: set[str] = field(default_factory=set)  # 已归档/删除的 id，迟到事件不复活；unarchived/created/快照可解除
+    rendered: dict[str, Light] = field(default_factory=dict)  # 键 → 已渲染灯态（缺省=灭）
+    display: Light = Light.OFF  # 兼容别名：全部槽位的最高优先级（无槽=灭）
+    gone: set[str] = field(default_factory=set)  # 已归档/删除的 id，迟到事件不复活
 
-    def compute_display(self, now_ms: int) -> Light:
-        if not self.sessions:
-            return Light.OFF
+    def _children_map(self) -> dict[str, list[str]]:
         children: dict[str, list[str]] = {}
         for s in self.sessions.values():
             if s.parent_id:
                 children.setdefault(s.parent_id, []).append(s.session_id)
+        return children
+
+    def group_light(self, sid: str, now_ms: int, children: dict[str, list[str]] | None = None) -> Light:
+        """sid 组（自己 + 全部后裔）的最高优先级灯态。"""
+        if children is None:
+            children = self._children_map()
         best = Light.OFF
         seen: set[str] = set()
-
-        def group_light(start: str) -> Light:
-            group = Light.OFF
-            stack = [start]
-            while stack:
-                cur = stack.pop()
-                if cur in seen:
-                    continue
-                seen.add(cur)
-                m = self.sessions.get(cur)
-                if m is None:
-                    continue
-                lv = m.light(now_ms)
-                if _PRIORITY[lv] > _PRIORITY[group]:
-                    group = lv
-                stack.extend(children.get(cur, ()))
-            return group
-
-        for s in self.sessions.values():
-            if s.parent_id and s.parent_id in self.sessions:
+        stack = [sid]
+        while stack:
+            cur = stack.pop()
+            if cur in seen:
                 continue
-            g = group_light(s.session_id)
-            if _PRIORITY[g] > _PRIORITY[best]:
-                best = g
-        for s in self.sessions.values():  # 环成员兜底：不属于任何组的会话也算灯，不整体忽略
-            if s.session_id in seen:
+            seen.add(cur)
+            m = self.sessions.get(cur)
+            if m is None:
                 continue
-            g = group_light(s.session_id)
-            if _PRIORITY[g] > _PRIORITY[best]:
-                best = g
+            lv = m.light(now_ms)
+            if _PRIORITY[lv] > _PRIORITY[best]:
+                best = lv
+            stack.extend(children.get(cur, ()))
         return best
 
+    def root_of(self, sid: str) -> str:
+        """沿 parent_id 上溯到最顶层已追踪祖先（环安全）。"""
+        cur = sid
+        seen: set[str] = set()
+        while cur not in seen:
+            seen.add(cur)
+            s = self.sessions.get(cur)
+            if s is None or not s.parent_id or s.parent_id not in self.sessions:
+                return cur
+            cur = s.parent_id
+        return sid
+
+    def slot_of(self, sid: str) -> str | None:
+        """有效槽位：折叠后的顶层祖先的号（子会话=父的号）。"""
+        s = self.sessions.get(self.root_of(sid))
+        return s.slot if s else None
+
+    def _is_root(self, s: SessionState) -> bool:
+        return s.parent_id is None or s.parent_id not in self.sessions
+
+    def assign_slots(self, now_ms: int) -> None:
+        """给无槽根会话按出现顺序补号；新到且满格时按规则淘汰一次；等号者不反复淘汰。"""
+        assigned = {s.slot: s for s in self.sessions.values() if s.slot}
+        waiting = sorted((s for s in self.sessions.values() if self._is_root(s) and not s.slot),
+                         key=lambda x: (x.first_seen_ms, x.session_id))
+        children = self._children_map()
+        for s in waiting:
+            free = next((k for k in SLOT_KEYS if k not in assigned), None)
+            if free is None and not s.wait_slot:
+                victim = self._pick_victim(assigned, children, now_ms)
+                if victim is not None and victim.slot:
+                    free = victim.slot
+                    victim.slot = None
+                    victim.wait_slot = True
+                    del assigned[free]
+            if free is None:
+                s.wait_slot = True
+                continue
+            s.slot = free
+            s.wait_slot = False
+            assigned[free] = s
+        # 子会话不占号：后来被认领为子会话的，释放其号
+        for s in self.sessions.values():
+            if s.slot and not self._is_root(s):
+                assigned.pop(s.slot, None)
+                s.slot = None
+                s.wait_slot = True
+
+    def _pick_victim(self, assigned: dict, children: dict, now_ms: int) -> SessionState | None:
+        """先挑最久空闲（按组显示为绿），再挑最早的失败；都没有→None（等腾出）。"""
+        idle = [s for s in assigned.values()
+                if self.group_light(s.session_id, now_ms, children) is Light.IDLE
+                and s.idle_since_ms is not None]
+        if idle:
+            return min(idle, key=lambda x: x.idle_since_ms)
+        failed = [s for s in assigned.values()
+                  if self.group_light(s.session_id, now_ms, children) is Light.FAILED
+                  and s.failed_since_ms is not None]
+        if failed:
+            return min(failed, key=lambda x: x.failed_since_ms)
+        return None
+
+    def _sync_ordering(self, now_ms: int) -> None:
+        for s in self.sessions.values():
+            own = s.light(now_ms)
+            if own is Light.IDLE:
+                if s.idle_since_ms is None:
+                    s.idle_since_ms = now_ms
+            else:
+                s.idle_since_ms = None
+            if own is Light.FAILED:
+                if s.failed_since_ms is None:
+                    s.failed_since_ms = now_ms
+            else:
+                s.failed_since_ms = None
+
+    def render_lights(self, now_ms: int) -> dict[str, Light]:
+        children = self._children_map()
+        out: dict[str, Light] = {}
+        for s in self.sessions.values():
+            if s.slot:
+                out[s.slot] = self.group_light(s.session_id, now_ms, children)
+        return out
+
+def _notify(state: GuardState, kind: str, sid: str, effects: list, detail: str | None = None) -> None:
+    """构造通知效果：槽位取折叠后的有效槽位；标题/项目取当前会话状态。"""
+    s = state.sessions.get(sid)
+    if s is None:
+        return
+    effects.append(Notify(
+        kind=kind,
+        session_id=sid,
+        slot=state.slot_of(sid),
+        title=s.title,
+        project=project_name(s.directory),
+        detail=detail,
+    ))
+
+
+def _has_running_descendants(state: GuardState, sid: str) -> bool:
+    children = state._children_map()
+    seen: set[str] = set()
+    stack = list(children.get(sid, ()))
+    while stack:
+        cur = stack.pop()
+        if cur in seen:
+            continue
+        seen.add(cur)
+        m = state.sessions.get(cur)
+        if m is not None and m.running:
+            return True
+        stack.extend(children.get(cur, ()))
+    return False
+
+
+def _maybe_finish_deferred(state: GuardState, sid: str, now_ms: int, effects: list) -> None:
+    """子会话全部停止后，沿祖先链补发挂起的完成通知。"""
+    cur = sid
+    seen: set[str] = set()
+    while cur not in seen:
+        seen.add(cur)
+        s = state.sessions.get(cur)
+        if s is None or not s.parent_id or s.parent_id not in state.sessions:
+            return
+        parent = state.sessions[s.parent_id]
+        cur = parent.session_id
+        if parent.completion_pending and not _has_running_descendants(state, cur):
+            parent.completion_pending = False
+            _notify(state, "completed", cur, effects)
+
+
+def apply_event(state: GuardState, ev: Event, now_ms: int) -> list:
+    effects: list = []
+    t, sid = ev.type, ev.session_id
+    if sid and sid in state.gone and t not in ("session.created", "session.unarchived"):
+        # 已归档/删除的会话：迟到的执行/等待类事件不复活它（ADR-0003：归档/删除释放）
+        _refresh(state, now_ms, effects)
+        return effects
+    if t == "session.created":
+        if sid:
+            state.gone.discard(sid)
+            s = _ensure(state, sid, now_ms)
+            if ev.parent_id:
+                s.parent_id = ev.parent_id
+            if ev.directory:
+                s.directory = ev.directory
+            if ev.title:
+                s.title = ev.title
+    elif t == "session.renamed":
+        s = state.sessions.get(sid) if sid else None
+        if s is not None and ev.title:
+            s.title = ev.title
+    elif t == "session.unarchived":
+        if sid:
+            state.gone.discard(sid)
+            _ensure(state, sid, now_ms)
+    elif t in ("session.archived", "session.deleted"):
+        if sid:
+            state.sessions.pop(sid, None)
+            state.gone.add(sid)
+    elif t == "session.execution.started":
+        if sid:
+            s = _ensure(state, sid, now_ms)
+            s.running, s.failed = True, False
+            s.completion_pending = False
+            if s.run_started_ms is None:
+                s.run_started_ms = now_ms
+    elif t == "session.execution.succeeded":
+        if sid:
+            s = _ensure(state, sid, now_ms)
+            s.running, s.failed = False, False
+            duration = (now_ms - s.run_started_ms) if s.run_started_ms is not None else None
+            s.run_started_ms = None
+            if state._is_root(s) and (duration is None or duration >= COMPLETION_MIN_RUN_MS):
+                if _has_running_descendants(state, sid):
+                    s.completion_pending = True
+                else:
+                    _notify(state, "completed", sid, effects)
+            _maybe_finish_deferred(state, sid, now_ms, effects)
+    elif t == "session.execution.failed":
+        if sid:
+            s = _ensure(state, sid, now_ms)
+            s.running, s.failed = False, True
+            s.run_started_ms = None
+            s.completion_pending = False
+            _notify(state, "failed", sid, effects)
+            _maybe_finish_deferred(state, sid, now_ms, effects)
+    elif t == "session.execution.interrupted":
+        if sid:
+            s = _ensure(state, sid, now_ms)
+            s.running = False
+            s.failed = ev.reason in FAILED_REASONS
+            s.run_started_ms = None
+            s.completion_pending = False
+            if ev.reason in FAILED_REASONS:
+                _notify(state, "interrupted", sid, effects)
+            _maybe_finish_deferred(state, sid, now_ms, effects)
+    elif t == "permission.asked":
+        if sid:
+            s = _ensure(state, sid, now_ms)
+            _begin_pending(s, "permission", ev.request_id or "permission:" + sid, now_ms)
+            state._sync_ordering(now_ms)
+            state.assign_slots(now_ms)
+            _notify(state, "permission", sid, effects, detail=ev.detail)
+    elif t == "permission.replied":
+        s = state.sessions.get(sid) if sid else None
+        if s is not None:
+            if ev.request_id:
+                s.pending.pop(ev.request_id, None)
+            else:
+                for k in [k for k, v in s.pending.items() if v == "permission"]:
+                    s.pending.pop(k, None)
+    elif t == "form.created":
+        if sid:
+            s = _ensure(state, sid, now_ms)
+            _begin_pending(s, "form", ev.request_id or "form:" + sid, now_ms)
+            state._sync_ordering(now_ms)
+            state.assign_slots(now_ms)
+            _notify(state, "question", sid, effects)
+    elif t in ("form.replied", "form.cancelled"):
+        s = state.sessions.get(sid) if sid else None
+        if s is not None and ev.request_id:
+            s.pending.pop(ev.request_id, None)
+    _refresh(state, now_ms, effects)
+    return effects
 
 @dataclass(frozen=True)
 class Event:
@@ -109,6 +351,7 @@ class Event:
     title: str | None = None
     request_id: str | None = None
     directory: str | None = None
+    detail: str | None = None
 
 
 def _s(v):
@@ -130,7 +373,7 @@ def parse_event(raw: dict) -> Event | None:
         if isinstance(d, dict) and _s(d.get("directory")):
             directory = _s(d.get("directory"))
             break
-    reason = parent_id = title = request_id = None
+    reason = parent_id = title = request_id = detail = None
     if t == "session.execution.interrupted":
         reason = _s(data.get("reason"))
     elif t == "session.created":
@@ -140,6 +383,12 @@ def parse_event(raw: dict) -> Event | None:
         title = _s(data.get("title"))
     elif t == "permission.asked":
         request_id = _s(data.get("id"))
+        res = data.get("resources")
+        if isinstance(res, list):
+            for item in res:
+                if _s(item):
+                    detail = _s(item)
+                    break
     elif t == "permission.replied":
         request_id = _s(data.get("requestID"))
     elif t == "form.created":
@@ -150,82 +399,13 @@ def parse_event(raw: dict) -> Event | None:
                 sid = _s(form.get("sessionID"))
     elif t in ("form.replied", "form.cancelled"):
         request_id = _s(data.get("id"))
-    return Event(t, sid, reason, parent_id, title, request_id, directory)
-def apply_event(state: GuardState, ev: Event, now_ms: int) -> list[SetKeyLight]:
-    effects: list[SetKeyLight] = []
-    t, sid = ev.type, ev.session_id
-    if sid and sid in state.gone and t not in ("session.created", "session.unarchived"):
-        # 已归档/删除的会话：迟到的执行/等待类事件不复活它（ADR-0003：归档/删除释放）
-        _refresh(state, now_ms, effects)
-        return effects
-    if t == "session.created":
-        if sid:
-            state.gone.discard(sid)
-            s = _ensure(state, sid)
-            if ev.parent_id:
-                s.parent_id = ev.parent_id
-            if ev.directory:
-                s.directory = ev.directory
-            if ev.title:
-                s.title = ev.title
-    elif t == "session.renamed":
-        s = state.sessions.get(sid) if sid else None
-        if s is not None and ev.title:
-            s.title = ev.title
-    elif t == "session.unarchived":
-        if sid:
-            state.gone.discard(sid)
-            _ensure(state, sid)
-    elif t in ("session.archived", "session.deleted"):
-        if sid:
-            state.sessions.pop(sid, None)
-            state.gone.add(sid)
-    elif t == "session.execution.started":
-        if sid:
-            s = _ensure(state, sid)
-            s.running, s.failed = True, False
-    elif t == "session.execution.succeeded":
-        if sid:
-            s = _ensure(state, sid)
-            s.running, s.failed = False, False
-    elif t == "session.execution.failed":
-        if sid:
-            s = _ensure(state, sid)
-            s.running, s.failed = False, True
-    elif t == "session.execution.interrupted":
-        if sid:
-            s = _ensure(state, sid)
-            s.running = False
-            s.failed = ev.reason in FAILED_REASONS
-    elif t == "permission.asked":
-        if sid:
-            _begin_pending(_ensure(state, sid), "permission",
-                           ev.request_id or "permission:" + sid, now_ms)
-    elif t == "permission.replied":
-        s = state.sessions.get(sid) if sid else None
-        if s is not None:
-            if ev.request_id:
-                s.pending.pop(ev.request_id, None)
-            else:
-                for k in [k for k, v in s.pending.items() if v == "permission"]:
-                    s.pending.pop(k, None)
-    elif t == "form.created":
-        if sid:
-            _begin_pending(_ensure(state, sid), "form",
-                           ev.request_id or "form:" + sid, now_ms)
-    elif t in ("form.replied", "form.cancelled"):
-        s = state.sessions.get(sid) if sid else None
-        if s is not None and ev.request_id:
-            s.pending.pop(ev.request_id, None)
-    _refresh(state, now_ms, effects)
-    return effects
-
+    return Event(t, sid, reason, parent_id, title, request_id, directory, detail)
 
 def apply_enrichment(state: GuardState, sid: str, *, title: str | None = None,
                      directory: str | None = None, parent_id: str | None = None,
-                     now_ms: int) -> list[SetKeyLight]:
-    """把会话详情（标题/目录/父会话，取自 GET /api/session/:id）并入追踪状态。"""
-    effects: list[SetKeyLight] = []
+                     now_ms: int) -> list:
+    """把会话详情（标题/目录/父会话）并入追踪状态。"""
+    effects: list = []
     s = state.sessions.get(sid)
     if s is not None:
         if title:
@@ -254,9 +434,8 @@ class Snapshot:
     sessions: list[SessionSnapshot] = field(default_factory=list)
     all_ids: set[str] | None = None  # None = 列表不完整，跳过缺席清理
 
-
-def apply_snapshot(state: GuardState, snap: Snapshot, now_ms: int) -> list[SetKeyLight]:
-    effects: list[SetKeyLight] = []
+def apply_snapshot(state: GuardState, snap: Snapshot, now_ms: int) -> list:
+    effects: list = []
     if snap.all_ids is not None:
         for sid in list(state.sessions):
             if sid not in snap.all_ids:
@@ -269,6 +448,7 @@ def apply_snapshot(state: GuardState, snap: Snapshot, now_ms: int) -> list[SetKe
             if not (inst.running or inst.pending):
                 continue
             s = SessionState(session_id=sid)
+            s.first_seen_ms = now_ms
             state.sessions[sid] = s
         state.gone.discard(sid)
         s.parent_id = inst.parent_id
@@ -281,27 +461,29 @@ def apply_snapshot(state: GuardState, snap: Snapshot, now_ms: int) -> list[SetKe
             s.failed = True
         elif inst.running or inst.outcome == "succeeded":
             s.failed = False
-        # outcome=interrupted/未知且未运行：中断原因在 REST 里不可分辨，保持现有红
-        # （ADR-0002：红不因歧义清除，等下次开跑或成功）
+        # outcome=interrupted/未知且未运行：中断原因不可分辨，保持现有红（ADR-0002）
         had = bool(s.pending)
         s.pending = dict(inst.pending)
         if s.pending and not had:
             s.waiting_visible_until = now_ms + WAITING_MIN_VISIBLE_MS
+        if inst.running and s.run_started_ms is None:
+            s.run_started_ms = now_ms
     _refresh(state, now_ms, effects)
     return effects
 
 
-def tick(state: GuardState, now_ms: int) -> list[SetKeyLight]:
+def tick(state: GuardState, now_ms: int) -> list:
     """时间推进：让等待保底到期之类的转变生效。"""
-    effects: list[SetKeyLight] = []
+    effects: list = []
     _refresh(state, now_ms, effects)
     return effects
 
 
-def _ensure(state: GuardState, sid: str) -> SessionState:
+def _ensure(state: GuardState, sid: str, now_ms: int) -> SessionState:
     s = state.sessions.get(sid)
     if s is None:
         s = SessionState(session_id=sid)
+        s.first_seen_ms = now_ms
         state.sessions[sid] = s
     return s
 
@@ -313,8 +495,21 @@ def _begin_pending(s: SessionState, kind: str, request_id: str, now_ms: int) -> 
         s.waiting_visible_until = now_ms + WAITING_MIN_VISIBLE_MS
 
 
-def _refresh(state: GuardState, now_ms: int, effects: list[SetKeyLight]) -> None:
-    new = state.compute_display(now_ms)
-    if new is not state.display:
-        state.display = new
-        effects.append(SetKeyLight(AGGREGATE_KEY, new))
+def _refresh(state: GuardState, now_ms: int, effects: list) -> None:
+    state._sync_ordering(now_ms)
+    state.assign_slots(now_ms)
+    desired = state.render_lights(now_ms)
+    for key in SLOT_KEYS:
+        new = desired.get(key, Light.OFF)
+        old = state.rendered.get(key, Light.OFF)
+        if new is not old:
+            effects.append(SetKeyLight(key, new))
+            if new is Light.OFF:
+                state.rendered.pop(key, None)
+            else:
+                state.rendered[key] = new
+    best = Light.OFF
+    for lv in state.rendered.values():
+        if _PRIORITY[lv] > _PRIORITY[best]:
+            best = lv
+    state.display = best
