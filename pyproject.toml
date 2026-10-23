@@ -1,0 +1,11 @@
+[project]
+name = "opencode-keyboard-traffic-light"
+version = "0.1.0"
+description = "OpenCode 键盘状态灯守护：会话状态 → Hi86 数字键灯 + 系统通知"
+requires-python = ">=3.13"
+dependencies = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-p no:cacheprovider"
