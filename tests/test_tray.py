@@ -54,3 +54,31 @@ def test_tooltip_all_status_words():
         tip = tray.tooltip_of(light, connected=True, session_count=1,
                               keyboard_count=0, dry_run=False)
         assert word in tip
+
+def test_waiting_blinks_only_when_active():
+    assert tray.is_blinking(Light.WAITING, connected=True, session_count=1,
+                            dry_run=False)
+    assert not tray.is_blinking(Light.RUNNING, connected=True, session_count=1,
+                                dry_run=False)
+    assert not tray.is_blinking(Light.WAITING, connected=True, session_count=1,
+                                dry_run=True)
+    assert not tray.is_blinking(Light.WAITING, connected=False, session_count=1,
+                                dry_run=False)
+    assert not tray.is_blinking(Light.WAITING, connected=True, session_count=0,
+                                dry_run=False)
+
+
+def test_blink_color_alternates_between_yellow_and_gray():
+    on = tray.blink_color(Light.WAITING, connected=True, session_count=1,
+                          dry_run=False, phase_on=True)
+    off = tray.blink_color(Light.WAITING, connected=True, session_count=1,
+                           dry_run=False, phase_on=False)
+    assert on == tray.COLOR_BY_LIGHT[Light.WAITING]
+    assert off == tray.GRAY
+
+
+def test_blink_color_static_when_not_waiting():
+    for phase in (True, False):
+        assert tray.blink_color(Light.RUNNING, connected=True, session_count=1,
+                                dry_run=False,
+                                phase_on=phase) == tray.COLOR_BY_LIGHT[Light.RUNNING]

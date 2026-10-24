@@ -56,9 +56,9 @@ powershell -ExecutionPolicy Bypass -File tools\uninstall_autostart.ps1
 
 ## 托盘与通知
 
-- 托盘图标：一个，颜色 = 全局最高优先级（黄 > 红 > 紫 > 绿）；未连接或无会话时灰色。
+- 托盘图标：一个，颜色 = 全局最高优先级（黄 > 红 > 紫 > 绿）；未连接或无会话时灰色；等待时黄/灰每 500ms 闪烁。
 - 右键菜单：退出 / 打开日志 / 打开 OpenCode。
-- 通知：托盘气泡（无需 winotify）；气泡不可用时退回日志。
+- 通知：托盘气泡（无需 winotify）；气泡不可用时退回日志，发送成功会写一行 `[气泡]`。
 
 ## 与旧 Notifier 交接
 

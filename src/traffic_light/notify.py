@@ -111,6 +111,7 @@ class TrayNotifier:
             level = "warning" if req.kind in ("failed", "cable") else "info"
             try:
                 self._balloon(title, body, level)
+                self._log.info("[气泡] %s ｜ %s", title, body)
                 return
             except Exception:
                 self._degraded = True

@@ -48,6 +48,24 @@ def color_of(light, *, connected: bool, session_count: int,
     return COLOR_BY_LIGHT.get(light, GRAY)
 
 
+def is_blinking(light, *, connected: bool, session_count: int,
+                dry_run: bool) -> bool:
+    """只有“等待”才闪烁：黄/灰交替，提示需要你处理。"""
+    if dry_run or not connected or session_count <= 0:
+        return False
+    return light is Light.WAITING
+
+
+def blink_color(light, *, connected: bool, session_count: int,
+                dry_run: bool, phase_on: bool) -> tuple[int, int, int]:
+    """按闪烁相位取颜色：暗相位用灰，其余同 color_of。"""
+    if is_blinking(light, connected=connected, session_count=session_count,
+                   dry_run=dry_run) and not phase_on:
+        return GRAY
+    return color_of(light, connected=connected, session_count=session_count,
+                    dry_run=dry_run)
+
+
 def tooltip_of(light, *, connected: bool, session_count: int,
                keyboard_count: int, dry_run: bool) -> str:
     """两行 tooltip：状态 + 会话数 / 键盘数；总长不超过 127 字符。"""
@@ -74,6 +92,10 @@ WM_NULL = 0x0000
 NIM_ADD, NIM_MODIFY, NIM_DELETE = 0, 1, 2
 NIF_MESSAGE, NIF_ICON, NIF_TIP, NIF_INFO = 0x1, 0x2, 0x4, 0x10
 NIIF_INFO, NIIF_WARNING, NIIF_ERROR = 0x1, 0x2, 0x3
+
+WM_TIMER = 0x0113
+BLINK_TIMER_ID = 1
+BLINK_INTERVAL_MS = 500
 
 MF_STRING = 0x0
 TPM_RIGHTBUTTON = 0x0002
@@ -241,6 +263,8 @@ class TrayIcon:
         self._added = False
         self._color = None
         self._tip = ""
+        self._blink_on = True
+        self._timer_on = False
 
     # ---- 对外接口（任意线程） ----
 
@@ -361,8 +385,12 @@ class TrayIcon:
     def _apply(self) -> None:
         with self._lock:
             p = dict(self._pending)
-        color = color_of(p["light"], connected=p["connected"],
-                         session_count=p["sessions"], dry_run=self._dry_run)
+        blink = is_blinking(p["light"], connected=p["connected"],
+                            session_count=p["sessions"], dry_run=self._dry_run)
+        self._sync_timer(blink)
+        color = blink_color(p["light"], connected=p["connected"],
+                            session_count=p["sessions"], dry_run=self._dry_run,
+                            phase_on=self._blink_on)
         tip = tooltip_of(p["light"], connected=p["connected"],
                          session_count=p["sessions"],
                          keyboard_count=p["keyboards"], dry_run=self._dry_run)
@@ -419,6 +447,31 @@ class TrayIcon:
             user32.DestroyIcon(icon)
         self._icons.clear()
 
+    def _sync_timer(self, blink: bool) -> None:
+        """等待态开 500ms 定时器，其余状态关掉；所有调用都在托盘线程。"""
+        user32 = _lib("user32")
+        user32.SetTimer.argtypes = [wt.HWND, ctypes.c_size_t, wt.UINT,
+                                    ctypes.c_void_p]
+        user32.SetTimer.restype = ctypes.c_size_t
+        user32.KillTimer.argtypes = [wt.HWND, ctypes.c_size_t]
+        if blink and not self._timer_on:
+            self._blink_on = True
+            self._timer_on = bool(user32.SetTimer(self._hwnd, BLINK_TIMER_ID,
+                                                  BLINK_INTERVAL_MS, None))
+        elif not blink and self._timer_on:
+            user32.KillTimer(self._hwnd, BLINK_TIMER_ID)
+            self._timer_on = False
+            self._blink_on = True
+
+    def _stop_timer(self) -> None:
+        if not self._timer_on:
+            return
+        user32 = _lib("user32")
+        user32.KillTimer.argtypes = [wt.HWND, ctypes.c_size_t]
+        user32.KillTimer(self._hwnd, BLINK_TIMER_ID)
+        self._timer_on = False
+        self._blink_on = True
+
     def _show_menu(self, hwnd) -> None:
         user32 = _lib("user32")
         user32.CreatePopupMenu.restype = wt.HANDLE
@@ -474,7 +527,12 @@ class TrayIcon:
             if msg == WM_COMMAND:
                 self._on_command(wparam & 0xFFFF)
                 return 0
+            if msg == WM_TIMER and wparam == BLINK_TIMER_ID:
+                self._blink_on = not self._blink_on
+                self._apply()
+                return 0
             if msg == WM_CLOSE:
+                self._stop_timer()
                 self._remove_icon()
                 user32.DestroyWindow(hwnd)
                 return 0
