@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """键盘灯光口：设备状态机 + 连续发帧循环。
 
-设备 I/O 全部经 device.py；本文件只管状态与节奏，不开第二处设备调用点。
+设备 I/O 全部经机型档案（profiles.py）；本文件只管状态与节奏，不开第二处设备调用点。
 安全红线：
   1. 一次失败即停：校验不符 / 独占打开失败 / 发帧失败且通道仍在 → disabled，永不重试。
   2. OemDrv.exe 在跑就避让：关句柄、不打开；退出后自动恢复。
@@ -18,17 +18,19 @@ import logging
 import threading
 import time
 
-from . import device, frame
+from . import device, frame, profiles
 from .core import Light, SetKeyLight
 
 
 class KeyboardLightPort:
-    """把 SetKeyLight 效果变成 520 字节帧，发给有线连接的 Hi86 配置通道。"""
+    """把 SetKeyLight 效果变成机型帧，发给有线连接的键盘配置通道。"""
 
     def __init__(self, log, *, on_wired_needed=None, fps: int = 20,
                  device_check_interval: float = 2.0, oem_check_interval: float = 5.0,
-                 clock=time.monotonic):
+                 clock=time.monotonic, profile=None):
         self._log = log
+        self._profile = (profile if profile is not None
+                         else profiles.Hi86Profile(device, frame))
         self._on_wired_needed = on_wired_needed
         self._fps = fps
         self._device_check_interval = device_check_interval
@@ -77,7 +79,7 @@ class KeyboardLightPort:
             self._thread.join(timeout=2)
             self._thread = None
         if self._handle is not None:
-            device.close(self._handle)
+            self._profile.close(self._handle)
             self._handle = None
 
     # ---- 后台循环与状态机 ----
@@ -92,6 +94,12 @@ class KeyboardLightPort:
         """单步状态机：_run 每 1/fps 秒调一次；测试注入 now 直接驱动。"""
         if self._state == "disabled":
             return  # 一次失败即停：永不重试
+        if not self._profile.capability.verified:
+            self._state = "waiting"
+            self._log_once("unverified", "机型 %s 未验证：%s"
+                           % (self._profile.capability.name,
+                              self._profile.capability.note))
+            return
         if self._poll_oem(now):
             self._hold_for_oem()
             return
@@ -108,7 +116,7 @@ class KeyboardLightPort:
         if now >= self._next_oem_check:
             self._next_oem_check = now + self._oem_check_interval
             try:
-                self._oem_running = bool(device.oemdrv_running())
+                self._oem_running = bool(self._profile.oemdrv_running())
             except Exception:
                 self._oem_running = True
                 self._log.debug("OemDrv 检测失败，按在跑处理", exc_info=True)
@@ -116,7 +124,7 @@ class KeyboardLightPort:
 
     def _hold_for_oem(self) -> None:
         if self._handle is not None:
-            device.close(self._handle)
+            self._profile.close(self._handle)
             self._handle = None
             self._log_once("hold_oem", "OemDrv.exe 在运行，暂停灯光")
         self._state = "hold_oem"
@@ -127,14 +135,14 @@ class KeyboardLightPort:
             return
         self._next_device_check = now + self._device_check_interval
         try:
-            mode = device.detect_mode()
+            mode = self._profile.detect_mode()
         except Exception as exc:
             # 枚举失败不是设备事实：不改状态，下一轮到期再试（不因一次读失败停灯）。
             self._log.debug("设备检测失败：%s", exc)
             return
-        if mode == device.MODE_WIRED:
+        if mode == profiles.MODE_WIRED:
             self._open_wired()
-        elif mode == device.MODE_24G:
+        elif mode == profiles.MODE_24G:
             self._state = "waiting"
             self._notify_wired_needed()
         else:
@@ -144,7 +152,7 @@ class KeyboardLightPort:
     def _open_wired(self) -> None:
         """wired：复核配置通道后独占打开；任何一步不过 → disabled，一次失败即停。"""
         try:
-            info = device.find_config_channel()
+            info = self._profile.find_channel()
         except Exception as exc:
             self._log.debug("配置通道查询失败：%s", exc)
             return
@@ -152,7 +160,7 @@ class KeyboardLightPort:
             self._disable("校验不符：未找到配置通道，停止灯光")
             return
         try:
-            ok, why = device.validate_channel(info)
+            ok, why = self._profile.validate(info)
         except Exception as exc:
             self._disable("校验不符：复核出错（%s），停止灯光" % (exc,))
             return
@@ -160,7 +168,7 @@ class KeyboardLightPort:
             self._disable("校验不符：%s，停止灯光" % (why,))
             return
         try:
-            self._handle = device.open_exclusive(info)
+            self._handle = self._profile.open(info)
         except Exception as exc:
             self._disable("独占打开失败：%s，停止灯光" % (exc,))
             return
@@ -182,10 +190,9 @@ class KeyboardLightPort:
     def _send_frame(self, now: float) -> None:
         with self._lock:
             lights = dict(self._lights)  # 加锁取副本：apply 在主循环线程写
-        breath = frame.breath_brightness(int(now * 1000))
-        payload = frame.build_frame(frame.render_slots(lights, breath))
+        payload = self._profile.render(lights, int(now * 1000))
         try:
-            device.write_feature(self._handle, payload)
+            self._profile.write(self._handle, payload)
         except Exception as exc:
             self._handle_failure(exc)
 
@@ -196,10 +203,10 @@ class KeyboardLightPort:
         通道仍在（驱动/硬件故障）→ disabled，绝不重试（红线）。
         """
         self._log.debug("发帧失败：%s", exc)
-        device.close(self._handle)
+        self._profile.close(self._handle)
         self._handle = None
         try:
-            info = device.find_config_channel()
+            info = self._profile.find_channel()
         except Exception:
             info = None  # 判不出来按「不在」处理：等待恢复比永久停灯更接近现场
             self._log.debug("发帧失败后复查通道出错", exc_info=True)

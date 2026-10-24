@@ -69,6 +69,8 @@ class HidDeviceInfo:
     usage_page: int
     usage: int
     feature_length: int
+    input_length: int = 0
+    output_length: int = 0
 
 
 class GUID(ctypes.Structure):
@@ -228,7 +230,9 @@ def _probe(path: str) -> HidDeviceInfo | None:
                 return None
             return HidDeviceInfo(path=path, vid=attrs.VendorID, pid=attrs.ProductID,
                                  usage_page=caps.UsagePage, usage=caps.Usage,
-                                 feature_length=caps.FeatureReportByteLength)
+                                 feature_length=caps.FeatureReportByteLength,
+                                 input_length=caps.InputReportByteLength,
+                                 output_length=caps.OutputReportByteLength)
         finally:
             hid.HidD_FreePreparsedData(preparsed)
     finally:

@@ -443,3 +443,13 @@ def test_on_wired_needed_error_does_not_break_step(fake):
     port = make_port(on_wired_needed=boom)
     port._step(0.0)
     assert port._state == "waiting"
+
+
+def test_unverified_profile_stays_waiting_and_never_touches_device(fake):
+    """未验证档案：只等待，不探测、不打开、不写（L2 通过前绝不碰设备）。"""
+    from traffic_light.profiles import M75V2Profile
+    port = make_port(profile=M75V2Profile())
+    for t in (0.0, 2.0, 5.0, 10.0):
+        port._step(t)
+    assert port._state == "waiting"
+    assert fake.calls == []

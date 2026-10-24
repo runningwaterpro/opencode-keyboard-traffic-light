@@ -13,6 +13,7 @@ from pathlib import Path
 
 from . import core
 from . import notify as notify_mod
+from . import profiles
 from . import runtime
 from .core import GuardState
 from .discovery import (ServiceFileError, ServiceInfo, StaleServiceError,
@@ -166,7 +167,8 @@ def _session_loop(info: ServiceInfo, state: GuardState,
     return connected
 
 
-def run(service_json: str | Path, verbose: bool = False, dry_run: bool = False) -> int:
+def run(service_json: str | Path, verbose: bool = False, dry_run: bool = False,
+        profile_name: str = "hi86") -> int:
     """跑守护主循环。Ctrl+C 退出；dry_run 只写日志、不碰键盘、不发通知。"""
     runtime.setup_logging(verbose)
     if dry_run:
@@ -184,6 +186,7 @@ def run(service_json: str | Path, verbose: bool = False, dry_run: bool = False) 
         light = KeyboardLightPort(
             _log,
             on_wired_needed=lambda: notifier.send(notify_mod.NotifyRequest(kind="cable")),
+            profile=profiles.get_profile(profile_name),
         )
         light.start()
     attempt = 0
