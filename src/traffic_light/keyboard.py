@@ -27,7 +27,7 @@ class KeyboardLightPort:
 
     def __init__(self, log, *, on_wired_needed=None, fps: int = 20,
                  device_check_interval: float = 2.0, oem_check_interval: float = 5.0,
-                 clock=time.monotonic, profile=None):
+                 clock=time.monotonic, profile=None, bound_path: str | None = None):
         self._log = log
         self._profile = (profile if profile is not None
                          else profiles.Hi86Profile(device, frame))
@@ -36,6 +36,8 @@ class KeyboardLightPort:
         self._device_check_interval = device_check_interval
         self._oem_check_interval = oem_check_interval
         self._clock = clock
+        self._bound_path = bound_path
+        self._failure_kind = None
 
         self._lock = threading.Lock()
         self._lights: dict[str, Light] = {}
@@ -81,6 +83,16 @@ class KeyboardLightPort:
         if self._handle is not None:
             self._profile.close(self._handle)
             self._handle = None
+
+    @property
+    def failure_kind(self) -> str | None:
+        """disabled 的原因：validate / open / write；未失败为 None。"""
+        return self._failure_kind
+
+    @property
+    def state(self) -> str:
+        """当前状态（idle/waiting/hold_oem/open/suspended/disabled），供托盘统计。"""
+        return self._state
 
     # ---- 后台循环与状态机 ----
 
@@ -134,6 +146,9 @@ class KeyboardLightPort:
         if now < self._next_device_check:
             return
         self._next_device_check = now + self._device_check_interval
+        if self._bound_path is not None:
+            self._check_bound()
+            return
         try:
             mode = self._profile.detect_mode()
         except Exception as exc:
@@ -149,30 +164,48 @@ class KeyboardLightPort:
             self._state = "waiting"
             self._log_once("none", "未检测到键盘，等待连接")
 
+    def _check_bound(self) -> None:
+        """绑定端口：只认自己那条路径；不在就等（由 hub 决定何时销毁）。"""
+        try:
+            infos = self._profile.list_channels()
+        except Exception as exc:
+            self._log.debug("设备枚举失败：%s", exc)
+            return
+        info = next((i for i in infos if i.path == self._bound_path), None)
+        if info is None:
+            self._state = "waiting"
+            self._log_once("gone", "键盘离线，等待恢复")
+            return
+        self._open_info(info)
+
     def _open_wired(self) -> None:
-        """wired：复核配置通道后独占打开；任何一步不过 → disabled，一次失败即停。"""
+        """wired：复核配置通道后独占打开；任何一步不过 → disabled。"""
         try:
             info = self._profile.find_channel()
         except Exception as exc:
             self._log.debug("配置通道查询失败：%s", exc)
             return
         if info is None:
-            self._disable("校验不符：未找到配置通道，停止灯光")
+            self._disable("校验不符：未找到配置通道，停止灯光", "validate")
             return
+        self._open_info(info)
+
+    def _open_info(self, info) -> None:
         try:
             ok, why = self._profile.validate(info)
         except Exception as exc:
-            self._disable("校验不符：复核出错（%s），停止灯光" % (exc,))
+            self._disable("校验不符：复核出错（%s），停止灯光" % (exc,), "validate")
             return
         if not ok:
-            self._disable("校验不符：%s，停止灯光" % (why,))
+            self._disable("校验不符：%s，停止灯光" % (why,), "validate")
             return
         try:
             self._handle = self._profile.open(info)
         except Exception as exc:
-            self._disable("独占打开失败：%s，停止灯光" % (exc,))
+            self._disable("独占打开失败：%s，停止灯光" % (exc,), "open")
             return
         self._state = "open"
+        self._failure_kind = None
         self._log_once("connected", "键盘已连接（wired）")
 
     def _notify_wired_needed(self) -> None:
@@ -205,6 +238,18 @@ class KeyboardLightPort:
         self._log.debug("发帧失败：%s", exc)
         self._profile.close(self._handle)
         self._handle = None
+        if self._bound_path is not None:
+            try:
+                present = any(i.path == self._bound_path
+                              for i in self._profile.list_channels())
+            except Exception:
+                present = False
+            if present:
+                self._disable("发帧失败，停止灯光功能", "write")
+            else:
+                self._state = "suspended"
+                self._log_once("suspended", "键盘离线，等待恢复")
+            return
         try:
             info = self._profile.find_channel()
         except Exception:
@@ -214,13 +259,14 @@ class KeyboardLightPort:
             self._state = "suspended"
             self._log_once("suspended", "键盘离线，等待恢复")
         else:
-            self._disable("发帧失败，停止灯光功能")
+            self._disable("发帧失败，停止灯光功能", "write")
 
     # ---- 小工具 ----
 
-    def _disable(self, message: str) -> None:
-        """一次失败即停：进入 disabled 后 _step 直接返回，永不重试。"""
+    def _disable(self, message: str, kind: str) -> None:
+        """进入 disabled 后 _step 直接返回；由 hub 决定重试还是停到拔插。"""
         self._state = "disabled"
+        self._failure_kind = kind
         self._log_once("disabled", message, logging.WARNING)
 
     def _log_once(self, key: str, message: str, level: int = logging.INFO) -> None:

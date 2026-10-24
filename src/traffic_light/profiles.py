@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""机型档案：把「不同键盘的协议差异」关在这一层。
+"""机型档案：把“不同键盘的协议差异”关在这一层。
 
 设计原则：
   1. 核心只认 Capability 声明（能驱动哪些键、什么帧率、是否已验证）；
@@ -40,6 +40,7 @@ class Profile(Protocol):
     def candidate_ids(self) -> set[tuple[int, int]]: ...
     def detect_mode(self, devices=None) -> str: ...
     def find_channel(self, devices=None): ...
+    def list_channels(self, devices=None) -> list: ...
     def validate(self, info) -> tuple[bool, str | None]: ...
     def open(self, info) -> int: ...
     def render(self, lights, now_ms: int) -> bytes: ...
@@ -84,6 +85,18 @@ class Hi86Profile:
 
     def find_channel(self, devices=None):
         return self._dev().find_config_channel(devices)
+
+    def list_channels(self, devices=None):
+        """所有通过完整校验的配置通道（同型号多把键盘 = 多条路径）。"""
+        device = self._dev()
+        if devices is None:
+            devices = device.list_devices()
+        out = []
+        for info in devices:
+            ok, _ = device.validate_channel(info)
+            if ok:
+                out.append(info)
+        return out
 
     def validate(self, info):
         return self._dev().validate_channel(info)
@@ -146,6 +159,9 @@ class M75V2Profile:
                 return info
         return None
 
+    def list_channels(self, devices=None):
+        return []   # 未验证：绝不让任何设备进入驱动路径
+
     def validate(self, info):
         return False, self.capability.note
 
@@ -177,8 +193,13 @@ def get_profile(name: str) -> Profile:
                          % (name, ", ".join(sorted(PROFILES)))) from None
 
 
+def verified_profiles() -> list[Profile]:
+    """所有已验证档案；未验证档案永远不会进入驱动路径。"""
+    return [p for p in PROFILES.values() if p.capability.verified]
+
+
 def select_profile(devices=None):
-    """选第一个「已验证且当前存在」的档案；没有返回 None。
+    """选第一个“已验证且当前存在”的档案；没有返回 None。
 
     未验证档案永不入选：探测阶段不允许任何写入路径被接上。
     """

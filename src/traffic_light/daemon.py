@@ -15,11 +15,12 @@ from . import core
 from . import notify as notify_mod
 from . import profiles
 from . import runtime
+from . import tray as tray_mod
 from .core import GuardState
 from .discovery import (ServiceFileError, ServiceInfo, StaleServiceError,
                         basic_auth_header, check_consistency, load_service_file)
 from .dryrun import DryRunLightPort, LIGHT_CN
-from .keyboard import KeyboardLightPort
+from .keyboard_hub import KeyboardHub
 from .rest import RestClient, build_snapshot, fetch_info
 from .sse import SSEFrameParser
 
@@ -33,6 +34,21 @@ _DISCOVER_RETRY_SECONDS = 5.0
 
 def _now_ms() -> int:
     return time.time_ns() // 1_000_000
+
+
+def _keyboard_count(light) -> int:
+    count = getattr(light, "open_count", None)
+    if count is not None:
+        return count
+    return 1 if getattr(light, "state", "") == "open" else 0
+
+
+def _pump(tray, state: GuardState, light, connected: bool) -> None:
+    """把聚合灯态推给托盘；tray 为 None 时什么都不做。"""
+    if tray is None:
+        return
+    tray.update(state.display, session_count=len(state.sessions),
+                keyboard_count=_keyboard_count(light), connected=connected)
 
 
 def _dispatch(light, notifier, effects) -> None:
@@ -92,8 +108,8 @@ def _stream_once(info: ServiceInfo, stop: threading.Event, out: queue.Queue) -> 
 
 
 def _enrich(info: ServiceInfo, state: GuardState,
-            light: DryRunLightPort | KeyboardLightPort,
-            notifier: notify_mod.DryRunNotifier | notify_mod.WinotifyNotifier,
+            light: DryRunLightPort | KeyboardHub,
+            notifier: notify_mod.Notifier,
             sid: str, fetched: set[str]) -> None:
     """为新出现的会话补取详情（标题/目录/父会话）。每会话至多取一次。"""
     fetched.add(sid)
@@ -114,8 +130,8 @@ def _enrich(info: ServiceInfo, state: GuardState,
 
 
 def _handle_frame(info: ServiceInfo, state: GuardState,
-                  light: DryRunLightPort | KeyboardLightPort,
-                  notifier: notify_mod.DryRunNotifier | notify_mod.WinotifyNotifier,
+                  light: DryRunLightPort | KeyboardHub,
+                  notifier: notify_mod.Notifier,
                   frame: dict, fetched: set[str]) -> None:
     ev = core.parse_event(frame)
     if ev is None:
@@ -129,9 +145,9 @@ def _handle_frame(info: ServiceInfo, state: GuardState,
 
 
 def _session_loop(info: ServiceInfo, state: GuardState,
-                  light: DryRunLightPort | KeyboardLightPort,
-                  notifier: notify_mod.DryRunNotifier | notify_mod.WinotifyNotifier,
-                  stop: threading.Event) -> bool:
+                  light: DryRunLightPort | KeyboardHub,
+                  notifier: notify_mod.Notifier,
+                  stop: threading.Event, tray=None) -> bool:
     """一次连接生命周期：先 REST 重建，再消费事件；返回是否成功连上过。"""
     q: queue.Queue = queue.Queue()
     threading.Thread(target=_stream_once, args=(info, stop, q),
@@ -152,23 +168,27 @@ def _session_loop(info: ServiceInfo, state: GuardState,
             kind, payload = q.get(timeout=_TICK_SECONDS)
         except queue.Empty:
             _dispatch(light, notifier, core.tick(state, _now_ms()))
+            _pump(tray, state, light, connected)
             continue
         if kind == "connected":
             connected = True
+            _pump(tray, state, light, True)
             _log.debug("事件流已连接")
         elif kind == "frame":
             try:
                 _handle_frame(info, state, light, notifier, payload, fetched)
             except Exception as exc:
                 _log.debug("事件处理失败：%s", exc)
+            _pump(tray, state, light, connected)
         elif kind == "disconnected":
+            _pump(tray, state, light, False)
             _log.info("事件流断开：%s", payload)
             return connected
     return connected
 
 
 def run(service_json: str | Path, verbose: bool = False, dry_run: bool = False,
-        profile_name: str = "hi86") -> int:
+        profile_name: str = "auto", use_tray: bool = True) -> int:
     """跑守护主循环。Ctrl+C 退出；dry_run 只写日志、不碰键盘、不发通知。"""
     runtime.setup_logging(verbose)
     if dry_run:
@@ -179,23 +199,34 @@ def run(service_json: str | Path, verbose: bool = False, dry_run: bool = False,
     service_json = Path(service_json)
     stop = threading.Event()
     state = GuardState()
-    notifier = notify_mod.create_notifier(dry_run, _log)
+    tray = None
+    if use_tray:
+        tray = tray_mod.TrayIcon(
+            _log, on_quit=stop.set,
+            log_path=runtime.DEFAULT_LOG_DIR / runtime.LOG_FILE_NAME,
+            dry_run=dry_run)
+        tray.start()
+        if not tray.available:
+            tray = None
+    notifier = notify_mod.create_notifier(
+        dry_run, _log, balloon=tray.balloon if tray is not None else None)
     if dry_run:
         light = DryRunLightPort(_log)
     else:
-        light = KeyboardLightPort(
-            _log,
+        names = None if profile_name == "auto" else [profile_name]
+        light = KeyboardHub(
+            _log, profile_names=names,
             on_wired_needed=lambda: notifier.send(notify_mod.NotifyRequest(kind="cable")),
-            profile=profiles.get_profile(profile_name),
         )
         light.start()
+    _pump(tray, state, light, False)
     attempt = 0
     try:
         while not stop.is_set():
             info = _discover(service_json, stop)
             if info is None:
                 break
-            if _session_loop(info, state, light, notifier, stop):
+            if _session_loop(info, state, light, notifier, stop, tray):
                 attempt = 0
             else:
                 attempt += 1
@@ -209,4 +240,6 @@ def run(service_json: str | Path, verbose: bool = False, dry_run: bool = False,
     finally:
         if not dry_run:
             light.stop()
+        if tray is not None:
+            tray.close()
     return 0

@@ -97,8 +97,36 @@ class WinotifyNotifier:
             self._log.debug("winotify 通知发送失败", exc_info=True)
 
 
+class TrayNotifier:
+    """托盘气泡适配器：气泡是主通道；不可用或发送失败时退回日志。"""
+
+    def __init__(self, log: logging.Logger, balloon=None) -> None:
+        self._log = log
+        self._balloon = balloon
+        self._degraded = balloon is None
+
+    def send(self, req: NotifyRequest) -> None:
+        title, body = format_notify(req)
+        if not self._degraded:
+            level = "warning" if req.kind in ("failed", "cable") else "info"
+            try:
+                self._balloon(title, body, level)
+                return
+            except Exception:
+                self._degraded = True
+                self._log.debug("托盘气泡发送失败，退回日志", exc_info=True)
+        self._log.info("[通知] %s ｜ %s", title, body)
+
+
+Notifier = DryRunNotifier | WinotifyNotifier | TrayNotifier
+
+
 def create_notifier(
-    dry_run: bool, log: logging.Logger
-) -> DryRunNotifier | WinotifyNotifier:
-    """dry_run → 干跑适配器；否则 winotify 适配器。"""
-    return DryRunNotifier(log) if dry_run else WinotifyNotifier(log)
+    dry_run: bool, log: logging.Logger, balloon=None
+) -> Notifier:
+    """dry_run → 日志；有托盘 → 气泡；否则退回 winotify（未装则日志）。"""
+    if dry_run:
+        return DryRunNotifier(log)
+    if balloon is not None:
+        return TrayNotifier(log, balloon)
+    return WinotifyNotifier(log)

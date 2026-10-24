@@ -78,3 +78,19 @@ def test_get_profile_rejects_unknown_name():
     assert profiles.get_profile("hi86").capability.name == "hi86"
     with pytest.raises(ValueError):
         profiles.get_profile("nope")
+
+def test_hi86_list_channels_only_valid():
+    p = profiles.Hi86Profile()
+    good = info(0x258A, 0x010C)
+    bad = info(0x258A, 0x010C, feature=6)
+    assert p.list_channels([bad, good]) == [good]
+
+
+def test_m75v2_list_channels_empty():
+    assert profiles.M75V2Profile().list_channels([info(0x0C45, 0x8006)]) == []
+
+
+def test_verified_profiles_excludes_unverified():
+    names = [p.capability.name for p in profiles.verified_profiles()]
+    assert "hi86" in names
+    assert "m75v2" not in names

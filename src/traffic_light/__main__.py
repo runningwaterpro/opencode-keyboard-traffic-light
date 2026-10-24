@@ -30,9 +30,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--profile",
-        choices=sorted(PROFILES),
-        default="hi86",
-        help="机型档案：hi86（默认，已验证）；m75v2（未验证，仅探测、不写入）",
+        choices=["auto"] + sorted(PROFILES),
+        default="auto",
+        help="机型档案：auto（默认，自动识别已验证键盘）；hi86；m75v2（未验证，不驱动）",
+    )
+    parser.add_argument(
+        "--no-tray",
+        action="store_true",
+        help="不创建托盘图标（排查用）",
     )
     args = parser.parse_args(argv)
 
@@ -45,7 +50,7 @@ def main(argv: list[str] | None = None) -> int:
         service_json = DEFAULT_SERVICE_JSON
 
     return run(service_json=service_json, verbose=args.verbose, dry_run=args.dry_run,
-               profile_name=args.profile)
+               profile_name=args.profile, use_tray=not args.no_tray)
 
 
 if __name__ == "__main__":
