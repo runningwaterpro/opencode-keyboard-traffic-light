@@ -49,11 +49,14 @@ def test_tooltip_truncated_to_limit():
 
 def test_tooltip_all_status_words():
     words = {"执行中": Light.RUNNING, "失败": Light.FAILED,
-             "等待": Light.WAITING, "空闲": Light.IDLE}
+             "等待": Light.WAITING, "完成": Light.IDLE}
     for word, light in words.items():
         tip = tray.tooltip_of(light, connected=True, session_count=1,
                               keyboard_count=0, dry_run=False)
         assert word in tip
+    tip = tray.tooltip_of(Light.OFF, connected=True, session_count=1,
+                          keyboard_count=0, dry_run=False)
+    assert "空闲" in tip
 
 def test_waiting_blinks_only_when_active():
     assert tray.is_blinking(Light.WAITING, connected=True, session_count=1,

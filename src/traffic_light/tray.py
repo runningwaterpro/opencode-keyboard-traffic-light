@@ -34,7 +34,7 @@ STATUS_CN = {
     Light.RUNNING: "执行中",
     Light.FAILED: "失败",
     Light.WAITING: "等待",
-    Light.IDLE: "空闲",
+    Light.IDLE: "完成",
 }
 
 TIP_MAX = 127
