@@ -1,7 +1,7 @@
 """纯核心状态机（主缝）：OpenCode 事件 → 灯态 / 槽位 / 通知效果。
 
 无 I/O、无时间源：调用方传入 now_ms（毫秒），保证离线可测、可回放。
-- 灯态：执行中=紫、失败=红、等待=黄（呼吸）、空闲=绿；无会话=灭。
+- 灯态：执行中=紫、失败=红、等待=黄（呼吸）、完成=绿（30 秒后灭）、其余=灭。
 - 槽位（ADR-0003）：会话第一次出现占最小空号（1→…→9→0），已占不重排；
   归档/删除释放；满时先淘汰最久空闲 → 最早的失败 → 否则等待；子会话不占号。
 - 通知（票⑥）：四类触发 + 静默规则，见 apply_event 内注释。
@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 WAITING_MIN_VISIBLE_MS = 500
+IDLE_VISIBLE_MS = 30_000  # 完成确认绿灯的显示窗口；到期即灭
 FAILED_REASONS = ("shutdown", "inactivity")
 SLOT_KEYS = ("1", "2", "3", "4", "5", "6", "7", "8", "9", "0")
 COMPLETION_MIN_RUN_MS = 5000
@@ -63,8 +64,10 @@ class SessionState:
     idle_since_ms: int | None = None
     failed_since_ms: int | None = None
     wait_slot: bool = False
+    completed_ms: int | None = None  # 最近一次成功的时刻；绿灯只在窗口内亮
 
-    def light(self, now_ms: int) -> Light:
+    def settled_light(self, now_ms: int) -> Light:
+        """不含「完成确认」衰减的灯态：排序与淘汰用它（空闲是状态，不是灯）。"""
         if self.pending or now_ms < self.waiting_visible_until:
             return Light.WAITING
         if self.failed:
@@ -72,6 +75,15 @@ class SessionState:
         if self.running:
             return Light.RUNNING
         return Light.IDLE
+
+    def light(self, now_ms: int) -> Light:
+        """显示灯态：完成后的绿只在窗口内亮，其余空闲一律灭。"""
+        kind = self.settled_light(now_ms)
+        if kind is not Light.IDLE:
+            return kind
+        if self.completed_ms is not None and now_ms - self.completed_ms < IDLE_VISIBLE_MS:
+            return Light.IDLE
+        return Light.OFF
 
 
 def project_name(directory: str | None) -> str | None:
@@ -115,6 +127,28 @@ class GuardState:
                 best = lv
             stack.extend(children.get(cur, ()))
         return best
+
+    def group_is_settled_idle(self, sid: str, now_ms: int,
+                              children: dict[str, list[str]] | None = None) -> bool:
+        """整组是否都已停下（不看绿灯衰减）：淘汰排序用。"""
+        if children is None:
+            children = self._children_map()
+        seen: set[str] = set()
+        stack = [sid]
+        members = 0
+        while stack:
+            cur = stack.pop()
+            if cur in seen:
+                continue
+            seen.add(cur)
+            m = self.sessions.get(cur)
+            if m is None:
+                continue
+            members += 1
+            if m.settled_light(now_ms) is not Light.IDLE:
+                return False
+            stack.extend(children.get(cur, ()))
+        return members > 0
 
     def root_of(self, sid: str) -> str:
         """沿 parent_id 上溯到最顶层已追踪祖先（环安全）。"""
@@ -165,9 +199,9 @@ class GuardState:
                 s.wait_slot = True
 
     def _pick_victim(self, assigned: dict, children: dict, now_ms: int) -> SessionState | None:
-        """先挑最久空闲（按组显示为绿），再挑最早的失败；都没有→None（等腾出）。"""
+        """先挑最久空闲（整组已停下），再挑最早的失败；都没有→None（等腾出）。"""
         idle = [s for s in assigned.values()
-                if self.group_light(s.session_id, now_ms, children) is Light.IDLE
+                if self.group_is_settled_idle(s.session_id, now_ms, children)
                 and s.idle_since_ms is not None]
         if idle:
             return min(idle, key=lambda x: x.idle_since_ms)
@@ -180,7 +214,7 @@ class GuardState:
 
     def _sync_ordering(self, now_ms: int) -> None:
         for s in self.sessions.values():
-            own = s.light(now_ms)
+            own = s.settled_light(now_ms)
             if own is Light.IDLE:
                 if s.idle_since_ms is None:
                     s.idle_since_ms = now_ms
@@ -281,12 +315,14 @@ def apply_event(state: GuardState, ev: Event, now_ms: int) -> list:
             s = _ensure(state, sid, now_ms)
             s.running, s.failed = True, False
             s.completion_pending = False
+            s.completed_ms = None
             if s.run_started_ms is None:
                 s.run_started_ms = now_ms
     elif t == "session.execution.succeeded":
         if sid:
             s = _ensure(state, sid, now_ms)
             s.running, s.failed = False, False
+            s.completed_ms = now_ms
             duration = (now_ms - s.run_started_ms) if s.run_started_ms is not None else None
             s.run_started_ms = None
             if state._is_root(s) and (duration is None or duration >= COMPLETION_MIN_RUN_MS):
@@ -299,6 +335,7 @@ def apply_event(state: GuardState, ev: Event, now_ms: int) -> list:
         if sid:
             s = _ensure(state, sid, now_ms)
             s.running, s.failed = False, True
+            s.completed_ms = None
             s.run_started_ms = None
             s.completion_pending = False
             _notify(state, "failed", sid, effects)
@@ -308,6 +345,7 @@ def apply_event(state: GuardState, ev: Event, now_ms: int) -> list:
             s = _ensure(state, sid, now_ms)
             s.running = False
             s.failed = ev.reason in FAILED_REASONS
+            s.completed_ms = None
             s.run_started_ms = None
             s.completion_pending = False
             if ev.reason in FAILED_REASONS:
@@ -457,6 +495,7 @@ def apply_snapshot(state: GuardState, snap: Snapshot, now_ms: int) -> list:
         if inst.title and not s.title:
             s.title = inst.title
         s.running = inst.running
+        s.completed_ms = None  # 重建不知道完成时刻：不假装新鲜
         if inst.failed:
             s.failed = True
         elif inst.running or inst.outcome == "succeeded":

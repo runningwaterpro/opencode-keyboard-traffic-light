@@ -66,7 +66,7 @@ def test_interrupted_user_and_superseded_silent():
         feed(s, "session.execution.started", T0 + 10, sid="ses_a")
         eff = feed(s, "session.execution.interrupted", T0 + 20, sid="ses_a", reason=reason)
         assert notifies(eff) == [], reason
-        assert eff == [SetKeyLight("1", Light.IDLE)], reason
+        assert eff == [SetKeyLight("1", Light.OFF)], reason
 
 
 def test_root_succeeded_at_five_seconds_notifies_completed():

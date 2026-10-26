@@ -25,8 +25,7 @@ def test_ten_sessions_take_keys_in_order():
         feed(s, "session.created", T0 + i, sid=f"s{i}")
     for i, key in enumerate(SLOT_KEYS):
         assert s.sessions[f"s{i}"].slot == key
-    assert set(s.rendered) == set(SLOT_KEYS)
-    assert set(s.rendered.values()) == {Light.IDLE}
+    assert s.rendered == {}   # 占号但不点灯：未运行没有「完成」事件
 
 
 def test_eleventh_session_gets_no_slot_when_all_busy():
@@ -42,7 +41,7 @@ def test_archive_releases_key_without_reshuffle():
     s = GuardState()
     for i in range(3):
         feed(s, "session.created", T0 + i, sid=f"s{i}")
-    assert feed(s, "session.archived", T0 + 10, sid="s1") == [SetKeyLight("2", Light.OFF)]
+    assert feed(s, "session.archived", T0 + 10, sid="s1") == []
     assert s.sessions["s0"].slot == "1"
     assert s.sessions["s2"].slot == "3"
 
@@ -53,8 +52,8 @@ def test_freed_key_goes_to_next_new_session_lowest_first():
         feed(s, "session.created", T0 + i, sid=f"s{i}")
     feed(s, "session.archived", T0 + 10, sid="s1")
     feed(s, "session.archived", T0 + 11, sid="s3")
-    assert feed(s, "session.created", T0 + 20, sid="sx") == [SetKeyLight("2", Light.IDLE)]
-    assert feed(s, "session.created", T0 + 21, sid="sy") == [SetKeyLight("4", Light.IDLE)]
+    assert feed(s, "session.created", T0 + 20, sid="sx") == []
+    assert feed(s, "session.created", T0 + 21, sid="sy") == []
     assert s.sessions["sx"].slot == "2"
     assert s.sessions["sy"].slot == "4"
 
@@ -63,7 +62,7 @@ def test_delete_releases_key():
     s = GuardState()
     feed(s, "session.created", T0, sid="s0")
     feed(s, "session.created", T0 + 1, sid="s1")
-    assert feed(s, "session.deleted", T0 + 10, sid="s0") == [SetKeyLight("1", Light.OFF)]
+    assert feed(s, "session.deleted", T0 + 10, sid="s0") == []
     assert s.sessions["s1"].slot == "2"
 
 def test_new_session_evicts_longest_idle():

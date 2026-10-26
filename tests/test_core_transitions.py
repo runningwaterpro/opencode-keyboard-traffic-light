@@ -19,8 +19,8 @@ def notifies(effects):
 
 def test_created_then_started_then_succeeded():
     s = GuardState()
-    assert feed(s, "session.created", T0) == [SetKeyLight("1", Light.IDLE)]
-    assert s.display is Light.IDLE
+    assert feed(s, "session.created", T0) == []   # 未运行不点绿
+    assert s.display is Light.OFF
     assert feed(s, "session.execution.started", T0 + 10) == [SetKeyLight("1", Light.RUNNING)]
     # 时长 <5s 的成功不发通知
     assert feed(s, "session.execution.succeeded", T0 + 20) == [SetKeyLight("1", Light.IDLE)]
@@ -48,7 +48,7 @@ def test_interrupted_user_and_superseded_are_silent():
         feed(s, "session.created", T0)
         feed(s, "session.execution.started", T0)
         eff = feed(s, "session.execution.interrupted", T0 + 10, reason=reason)
-        assert lights(eff) == [Light.IDLE], reason
+        assert lights(eff) == [Light.OFF], reason
         assert notifies(eff) == [], reason
         assert s.sessions["ses_a"].failed is False
 
@@ -68,7 +68,7 @@ def test_interrupted_unknown_reason_is_silent():
     feed(s, "session.created", T0)
     feed(s, "session.execution.started", T0)
     eff = feed(s, "session.execution.interrupted", T0 + 10, reason=None)
-    assert lights(eff) == [Light.IDLE]
+    assert lights(eff) == [Light.OFF]
     assert notifies(eff) == []
 
 
@@ -81,7 +81,7 @@ def test_permission_waiting_and_min_visible():
     assert feed(s, "permission.replied", T0 + 110, request_id="prq_1") == []
     assert tick(s, T0 + 200) == []
     assert s.display is Light.WAITING
-    assert lights(tick(s, T0 + 600)) == [Light.IDLE]
+    assert lights(tick(s, T0 + 600)) == [Light.OFF]
 
 
 def test_permission_multiple_until_all_cleared():
@@ -93,7 +93,7 @@ def test_permission_multiple_until_all_cleared():
     assert feed(s, "permission.replied", T0 + 10, request_id="a") == []
     assert tick(s, T0 + 1000) == []
     assert s.display is Light.WAITING
-    assert lights(feed(s, "permission.replied", T0 + 1010, request_id="b")) == [Light.IDLE]
+    assert lights(feed(s, "permission.replied", T0 + 1010, request_id="b")) == [Light.OFF]
 
 
 def test_permission_replied_without_id_clears_session_permissions():
@@ -101,7 +101,7 @@ def test_permission_replied_without_id_clears_session_permissions():
     feed(s, "session.created", T0)
     feed(s, "permission.asked", T0, request_id="a")
     feed(s, "permission.asked", T0, request_id="b")
-    assert lights(feed(s, "permission.replied", T0 + 700, request_id=None)) == [Light.IDLE]
+    assert lights(feed(s, "permission.replied", T0 + 700, request_id=None)) == [Light.OFF]
     assert s.sessions["ses_a"].pending == {}
 
 
@@ -112,18 +112,18 @@ def test_form_waiting_cancel_and_reply():
     assert eff == [Notify(kind="question", session_id="ses_a", slot="1"),
                    SetKeyLight("1", Light.WAITING)]
     assert tick(s, T0 + 1000) == []
-    assert lights(feed(s, "form.cancelled", T0 + 1000, request_id="frm_1")) == [Light.IDLE]
+    assert lights(feed(s, "form.cancelled", T0 + 1000, request_id="frm_1")) == [Light.OFF]
     assert lights(feed(s, "form.created", T0 + 2000, request_id="frm_2")) == [Light.WAITING]
     assert feed(s, "form.replied", T0 + 2010, request_id="frm_2") == []
     assert s.display is Light.WAITING
-    assert lights(tick(s, T0 + 2500)) == [Light.IDLE]
+    assert lights(tick(s, T0 + 2500)) == [Light.OFF]
 
 def test_priority_across_sessions():
     # 按槽位断言：A=键 1、B=键 2
     s = GuardState()
-    assert feed(s, "session.created", T0, sid="ses_a") == [SetKeyLight("1", Light.IDLE)]
-    assert feed(s, "session.created", T0, sid="ses_b") == [SetKeyLight("2", Light.IDLE)]
-    assert s.display is Light.IDLE
+    assert feed(s, "session.created", T0, sid="ses_a") == []
+    assert feed(s, "session.created", T0, sid="ses_b") == []
+    assert s.display is Light.OFF
     assert feed(s, "session.execution.started", T0 + 10, sid="ses_b") == [SetKeyLight("2", Light.RUNNING)]
     eff = feed(s, "session.execution.failed", T0 + 20, sid="ses_a")
     assert lights(eff) == [Light.FAILED]
@@ -152,12 +152,12 @@ def test_child_sessions_fold_into_parent():
     assert lights(feed(s, "session.archived", T0 + 50, sid="ses_p")) == [Light.OFF]
 
 
-def test_unarchived_returns_as_idle():
+def test_unarchived_returns_dark():
     s = GuardState()
     feed(s, "session.created", T0)
     feed(s, "session.archived", T0 + 10)
     assert s.display is Light.OFF
-    assert lights(feed(s, "session.unarchived", T0 + 20)) == [Light.IDLE]
+    assert feed(s, "session.unarchived", T0 + 20) == []
 
 
 def test_renamed_for_unknown_session_is_ignored():
@@ -172,7 +172,7 @@ def test_noisy_events_ignored():
     for t in ("session.reasoning.delta", "session.text.delta", "session.tool.called",
               "session.step.started", "session.usage.updated", "server.connected"):
         assert apply_event(s, Event(type=t, session_id="ses_a"), T0 + 5) == []
-    assert s.display is Light.IDLE
+    assert s.display is Light.OFF
     assert len(s.sessions) == 1
 
 
@@ -192,7 +192,7 @@ def test_parent_cycle_still_shows_group_light():
     s.sessions["ses_a"].parent_id = "ses_b"
     s.sessions["ses_b"].parent_id = "ses_a"
     eff = feed(s, "session.execution.started", T0 + 10, sid="ses_a")
-    assert eff == [SetKeyLight("1", Light.OFF), SetKeyLight("2", Light.OFF)]
+    assert eff == []   # 双方都不是根：没有可显示的灯
     assert s.display is Light.OFF
     assert tick(s, T0 + 20) == []
 

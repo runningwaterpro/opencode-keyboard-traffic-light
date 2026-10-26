@@ -31,7 +31,7 @@ def test_rebuild_patches_tracked_sessions():
     apply_event(st, Event(type="session.execution.started", session_id="ses_old"), T0 + 10)
     apply_snapshot(st, snap([S("ses_old", title="T", running=False, failed=False)]), T0 + 100)
     assert st.sessions["ses_old"].running is False
-    assert st.display is Light.IDLE
+    assert st.display is Light.OFF   # 重建后的空闲不点绿
     assert st.sessions["ses_old"].title == "T"
 
 
@@ -48,7 +48,7 @@ def test_rebuild_removes_absent():
     apply_event(st, Event(type="session.created", session_id="ses_gone"), T0)
     eff = apply_snapshot(st, snap([], all_ids={"ses_other"}), T0 + 10)
     assert "ses_gone" not in st.sessions
-    assert eff == [SetKeyLight("1", Light.OFF)]
+    assert eff == []   # 从未点亮的会话被移除：没有灯态变化
 
 
 def test_rebuild_incomplete_list_keeps_unknown():
@@ -96,7 +96,7 @@ def test_rebuild_succeeded_clears_red():
     apply_event(st, Event(type="session.created", session_id="ses_x"), T0)
     apply_event(st, Event(type="session.execution.failed", session_id="ses_x"), T0 + 10)
     apply_snapshot(st, snap([S("ses_x", running=False, failed=False, outcome="succeeded")]), T0 + 100)
-    assert st.display is Light.IDLE
+    assert st.display is Light.OFF   # 红清了，但完成时刻未知，不点绿
 
 
 def test_rebuild_running_clears_red():
