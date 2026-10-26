@@ -83,15 +83,22 @@ def test_two_keyboards_both_driven():
     assert hub.open_count == 2
 
 
-def test_unplug_stops_and_removes_port():
+def test_open_port_survives_enumeration_loss():
+    """独占句柄让重建探测必然失败：枚举看不到已持有的路径，不得移除端口。
+
+    回归：曾按「枚举不到 = 拔线」处理，实机上每 4 秒断开重连一次（日志 155 次）。
+    真拔线由端口自己的发帧失败/重连逻辑反映，不靠枚举判定。
+    """
     profile = FakeProfile([info("p1")])
     hub, ports = make_hub([profile])
     hub._reconcile(0.0)
-    profile.infos = []
-    hub._reconcile(1.0)
-    assert ports["p1"].stopped
-    assert hub._ports == {}
-    assert hub.open_count == 0
+    port = ports["p1"]
+    profile.infos = []  # 模拟 _probe 撞上 share=0，路径从枚举里消失
+    for t in (2.0, 4.0, 6.0, 8.0):
+        hub._reconcile(t)
+    assert not port.stopped
+    assert hub._ports.get("p1") is port
+    assert hub.open_count == 1
 
 
 def test_apply_forwards_to_all_ports():

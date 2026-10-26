@@ -47,6 +47,7 @@ class KeyboardHub:
         self._strikes: dict[str, int] = {}
         self._retry_at: dict[str, float] = {}
         self._blocked: set[str] = set()
+        self._port_profiles: dict[str, object] = {}
         self._logged: set[str] = set()
 
         self._stop = threading.Event()
@@ -109,6 +110,15 @@ class KeyboardHub:
         desired = self._enumerate()
         with self._lock:
             existing = dict(self._ports)
+
+        for path, port in existing.items():
+            if path in desired:
+                continue
+            profile = self._port_profiles.get(path)
+            if profile is not None and port.state != "disabled":
+                # 我们以 share=0 独占着这条通道，重新探测必然失败。
+                # 「探测不到」不等于「设备已拔」：真拔线由端口的发帧失败反映。
+                desired[path] = (profile, None)
 
         for path in list(existing):
             if path not in desired:
@@ -204,11 +214,13 @@ class KeyboardHub:
         port.start()
         with self._lock:
             self._ports[path] = port
+            self._port_profiles[path] = profile
         self._log.info("键盘已接入：%s（%s）", path, profile.capability.name)
 
     def _drop_port(self, path: str) -> None:
         with self._lock:
             port = self._ports.pop(path, None)
+            self._port_profiles.pop(path, None)
         if port is None:
             return
         try:
