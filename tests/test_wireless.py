@@ -11,8 +11,8 @@ import pytest
 
 from traffic_light import dongle, frame
 from traffic_light.core import Light, SetKeyLight
-from traffic_light.wireless import (BLANK, MERGE_S, RESEND_S, RETRY_S,
-                                    TYPING_IDLE_S, WirelessLightPort)
+from traffic_light.wireless import (BLANK, CLEAR_IDLE_S, MERGE_S, RESEND_S,
+                                    RETRY_S, TYPING_IDLE_S, WirelessLightPort)
 
 LOG = logging.getLogger("wireless-test")
 
@@ -181,6 +181,43 @@ def test_turning_off_sends_black_then_keeps_blank_keepalives():
     step(port, world, 500.0)              # 继续按周期保活
     assert len(sent_times(transport)) == 4
     assert all(buf == BLANK for _, buf in transport.sent[1:])
+
+
+def test_clearing_a_light_waits_only_five_seconds_for_quiet():
+    """熄灭比点亮宽容：会话重新开跑、绿灯该灭时，只要 5 秒安静就发。
+
+    真机现象（2026-10-27）：打完 prompt 后绿灯挂着不灭，因为一刀切 15 秒。
+    熄灭错过只是多看几秒旧灯，代价远小于「该亮没亮」，所以放宽到 5 秒。
+    """
+    port, transport, world = make_port()
+    port.apply([SetKeyLight("1", Light.IDLE)])
+    step(port, world, 0.0)
+    step(port, world, 1.0)
+    assert sent_times(transport) == [1.0]
+
+    port.apply([SetKeyLight("1", Light.RUNNING)])     # 会话重新开跑 → 全灭
+    world.idle = CLEAR_IDLE_S - 1                     # 4 秒：还不够
+    step(port, world, 10.0)
+    assert sent_times(transport) == [1.0]
+
+    world.idle = CLEAR_IDLE_S + 1                     # 6 秒：放行
+    step(port, world, 10.5)
+    assert sent_times(transport) == [1.0, 10.5]
+    assert transport.sent[-1][1] == BLANK
+
+
+def test_lighting_up_still_waits_the_full_fifteen_seconds():
+    """点亮不放松：黄灯还是要等你停手满 15 秒，宁晚不吞键。"""
+    port, transport, world = make_port()
+    port.apply([SetKeyLight("1", Light.WAITING)])
+    world.idle = TYPING_IDLE_S - 1                    # 14 秒
+    step(port, world, 0.0)
+    step(port, world, 1.0)
+    assert sent_times(transport) == []
+
+    world.idle = TYPING_IDLE_S + 1                    # 16 秒
+    step(port, world, 1.5)
+    assert len(sent_times(transport)) == 1
 
 
 # ---- 打字门控（硬约束：15 秒内一帧都不发） ----

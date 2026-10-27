@@ -36,6 +36,9 @@ from .core import Light, SetKeyLight
 
 # 人手停下来多久才算「不打了」。实测每帧必丢一次按键上报，所以宁可多等。
 TYPING_IDLE_S = 15.0
+# 只是「熄灭」（全灭）时的等待：错过了只是多看几秒旧灯，
+# 代价远小于「该亮没亮」，所以不必等那么久。
+CLEAR_IDLE_S = 5.0
 # 补帧间隔。单帧能活约 60 秒，35 秒留 25 秒余量；与 TYPING_IDLE_S 之和 50 ≤ 55。
 RESEND_S = 35.0
 # 合并窗口：1 秒内的多次灯态变化只发一帧。
@@ -167,7 +170,7 @@ class WirelessLightPort:
                 return
             # 打开接收器要枚举 + 握手，可能耗几秒；这段时间人手又放回键盘了。
             # 发帧前再看一眼空闲时间，别在「刚停手又开打」的那一秒丢键。
-            if self._idle() < TYPING_IDLE_S:
+            if self._idle() < self._idle_gate():
                 self._note_skip("打字中")
                 return
         self._send(now)
@@ -191,9 +194,18 @@ class WirelessLightPort:
                              or now - self._sent_at < MERGE_S)
             if in_merge and recently_sent:
                 return "合并窗口"
-        if self._idle() < TYPING_IDLE_S:
+        if self._idle() < self._idle_gate():
             return "打字中"
         return None
+
+    def _idle_gate(self) -> float:
+        """这一帧要等多久的安静。
+
+        两档门控的吞键风险一样，差别只在错过之后的代价：
+        该亮没亮 = 事没通知到；该灭没灭 = 多看几秒旧灯。
+        所以全灭只等 5 秒，其余仍等 15 秒。
+        """
+        return CLEAR_IDLE_S if self._desired == BLANK else TYPING_IDLE_S
 
     def _idle(self) -> float:
         """距上次用户输入的秒数。取不到就按 0 算：不确定时不发帧，少亮比丢键安全。"""
