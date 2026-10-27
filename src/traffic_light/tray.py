@@ -98,6 +98,7 @@ BLINK_TIMER_ID = 1
 BLINK_INTERVAL_MS = 500
 
 MF_STRING = 0x0
+MF_SEPARATOR = 0x0800
 TPM_RIGHTBUTTON = 0x0002
 TPM_BOTTOMALIGN = 0x0020
 ID_QUIT, ID_LOG, ID_OPENCODE = 1001, 1002, 1003
@@ -477,9 +478,10 @@ class TrayIcon:
         user32.CreatePopupMenu.restype = wt.HANDLE
         menu = user32.CreatePopupMenu()
         user32.AppendMenuW.argtypes = [wt.HANDLE, wt.UINT, ctypes.c_size_t, wt.LPCWSTR]
-        user32.AppendMenuW(menu, MF_STRING, ID_QUIT, "退出")
         user32.AppendMenuW(menu, MF_STRING, ID_LOG, "打开日志")
         user32.AppendMenuW(menu, MF_STRING, ID_OPENCODE, "打开 OpenCode")
+        user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
+        user32.AppendMenuW(menu, MF_STRING, ID_QUIT, "退出")
 
         pt = wt.POINT()
         user32.GetCursorPos(ctypes.byref(pt))
