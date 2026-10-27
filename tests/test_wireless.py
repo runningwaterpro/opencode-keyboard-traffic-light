@@ -123,27 +123,49 @@ def test_second_key_lights_its_own_led():
     assert color_of(buf, "1") == (0, 0, 0)
 
 
-def test_running_only_never_touches_the_device():
-    """执行中不落色：只有执行中的灯态等于「什么都不用显示」，不发帧也不打开。"""
+def test_running_only_lights_nothing_but_keeps_the_keyboard_awake():
+    """执行中不落色：等于「什么都不用显示」，只发空白保活帧，一个 LED 都不点。"""
     port, transport, world = make_port()
     port.apply([SetKeyLight("1", Light.RUNNING)])
-    for t in (0.0, 1.0, 10.0, 50.0):
-        step(port, world, t)
-    assert transport.open_calls == []
-    assert transport.sent == []
+    run(port, world, 0.0, 50.0)
+    assert transport.open_calls                    # 保活要打开设备
+    assert transport.sent
+    assert all(buf == BLANK for _, buf in transport.sent)
 
 
-def test_no_lights_never_opens_or_resends():
-    """没有灯态要显示：不补帧、不无谓重试打开。"""
+def test_no_lights_still_sends_blank_keepalives():
+    """没有灯态也要定期发一帧空白保活。
+
+    真机复现（2026-10-27）：2.4G 下会话结束后对应的数字键不亮，
+    只有偶尔碰一下键盘才补上绿灯。原因是不发帧时键盘约 70 秒休眠，
+    休眠后发帧送不进去（断链后只有物理按键能叫醒）。
+    空白帧不点亮任何 LED，视觉上无变化，唯一作用是别让键盘睡过去。
+    """
     port, transport, world = make_port()
-    for t in (0.0, 1.0, 40.0, 400.0):
-        step(port, world, t)
-    assert transport.open_calls == []
-    assert transport.sent == []
+    step(port, world, 0.0)
+    run(port, world, 1.0, 120.0)
+    times = sent_times(transport)
+    assert len(times) >= 3, times
+    gaps = [b - a for a, b in zip(times, times[1:])]
+    assert max(gaps) <= RESEND_S + STEP, gaps
+    assert all(buf == BLANK for _, buf in transport.sent)
 
 
-def test_turning_off_sends_one_black_frame_then_stops():
-    """灯灭了就发一帧全灭，之后不再补帧（全灭没有要显示的东西）。"""
+def test_completion_after_a_long_blank_stretch_is_delivered():
+    """空白保活跑了两分钟之后，完成事件必须能立刻上键。
+
+    这条钉住用户看到的现象：会话跑完，灯要亮；不能因为键盘睡了而丢掉。
+    """
+    port, transport, world = make_port()
+    run(port, world, 0.0, 120.0)          # 两分钟没有灯态
+    port.apply([SetKeyLight("1", Light.IDLE)])
+    t = world.now + MERGE_S + STEP
+    step(port, world, t)
+    assert color_of(transport.sent[-1][1], "1") == frame.COLORS[Light.IDLE]
+
+
+def test_turning_off_sends_black_then_keeps_blank_keepalives():
+    """灯灭了立刻发一帧全灭，之后只发空白保活（全灭内容不再变化）。"""
     port, transport, world = make_port()
     port.apply([SetKeyLight("1", Light.FAILED)])
     step(port, world, 0.0)
@@ -154,9 +176,11 @@ def test_turning_off_sends_one_black_frame_then_stops():
     assert sent_times(transport) == [1.0, 2.0]
     assert transport.sent[-1][1] == BLANK
 
-    for t in (100.0, 1000.0):            # 全灭之后不再补帧
-        step(port, world, t)
-    assert sent_times(transport) == [1.0, 2.0]
+    step(port, world, 2.0 + RESEND_S)     # 满一个补帧周期，再发一帧空白
+    assert sent_times(transport) == [1.0, 2.0, 2.0 + RESEND_S]
+    step(port, world, 500.0)              # 继续按周期保活
+    assert len(sent_times(transport)) == 4
+    assert all(buf == BLANK for _, buf in transport.sent[1:])
 
 
 # ---- 打字门控（硬约束：15 秒内一帧都不发） ----
@@ -467,7 +491,7 @@ def test_apply_ignores_non_light_effects():
     port.apply(["不是效果", object()])
     for t in (0.0, 10.0):
         step(port, world, t)
-    assert transport.open_calls == []
+    assert all(buf == BLANK for _, buf in transport.sent)   # 一个 LED 都不点
 
 
 def test_reopen_pushes_the_frame_even_if_content_is_unchanged():

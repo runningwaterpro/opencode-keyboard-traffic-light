@@ -175,8 +175,10 @@ class WirelessLightPort:
     def _skip_reason_at(self, now: float) -> str | None:
         """不发帧的理由；None = 该发。判定顺序即优先级，日志里看到的就是第一道闸。"""
         if self._desired == self._last_sent:
-            if self._desired == BLANK:
-                return "无灯态"                       # 全灭：没有要显示的东西
+            # 内容没变：只按补帧周期重发。全灭（BLANK）也走这条路——
+            # 空白帧视觉上没有任何变化，它的作用是让键盘别睡过去。
+            # 键盘约 70 秒无通信就休眠，休眠后发帧送不进去，只有物理按键能叫醒；
+            # 一旦让它睡了，之后完成事件想点亮就点不亮（2026-10-27 真机复现）。
             if now - self._sent_at < RESEND_S:
                 return "未到补帧周期"
         else:
