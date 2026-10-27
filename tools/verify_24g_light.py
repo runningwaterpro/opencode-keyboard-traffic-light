@@ -115,19 +115,37 @@ def pump_until_frame(port, transport, timeout: float, label: str) -> bool:
     return False
 
 
-def warn_if_cable_plugged() -> None:
+def cable_plugged() -> bool:
+    """数据线是否还插着。
+
+    插线时键盘走有线通道，2.4G 写入会被接收器 ACK 但键盘不执行。
+    判据：出现了第二个 3554:FA09 键盘集合（接收器自己的那个是 21 字节输入）。
+    枚举失败按「没插」处理，不拦着用户跑。
+    """
     try:
         devices = device.list_devices()
-    except Exception as exc:
-        print("  设备枚举失败（不影响继续）：%s" % exc)
-        return
-    for info in devices:
-        if (info.vid, info.pid) == (dongle.VID_RECEIVER, dongle.PID_RECEIVER) \
-                and info.usage_page == 0x01 and info.usage == 0x06 \
-                and info.input_length == 9:
-            print("  警告：发现第二个 3554:FA09 键盘集合，数据线可能还插着。")
-            print("        插线时 2.4G 写入会被 ACK，但键盘不执行，灯不会变。")
-            return
+    except Exception:
+        return False
+    return any((info.vid, info.pid) == (dongle.VID_RECEIVER, dongle.PID_RECEIVER)
+               and info.usage_page == 0x01 and info.usage == 0x06
+               and info.input_length == 9 for info in devices)
+
+
+def warn_if_cable_plugged() -> None:
+    if cable_plugged():
+        print("  警告：发现第二个 3554:FA09 键盘集合，数据线可能还插着。")
+        print("        插线时 2.4G 写入会被 ACK，但键盘不执行，灯不会变。")
+
+
+def wait_until_unplugged(max_wait: float) -> bool:
+    """等数据线拔掉再开始计时；超时返回 False。"""
+    start = time.monotonic()
+    while time.monotonic() - start < max_wait:
+        if not cable_plugged():
+            return True
+        print("  数据线还插着，等它拔掉（最多等 %.0f 秒）…" % max_wait, flush=True)
+        time.sleep(2.0)
+    return False
 
 
 def phase_a(port, transport) -> bool:
@@ -196,6 +214,9 @@ def phase_d(port, transport, minutes: float) -> bool:
     """补帧长跑：每 35 秒一帧，帧间间隔始终小于灯 60 秒的寿命。"""
     print("\nD 常亮：请离开键盘，别碰键盘和鼠标（%.0f 分钟）" % minutes)
     print("  预期：键 1 常绿；每 35 秒黑约 1 秒后自己回来；不能整块灭掉")
+    if not wait_until_unplugged(600.0):
+        print("  数据线一直没拔：插线时 2.4G 写入不生效，本轮无法验收")
+        return False
     port.apply([SetKeyLight("1", Light.IDLE), SetKeyLight("3", Light.OFF)])
     initial = len(transport.sent)
     start = time.monotonic()
