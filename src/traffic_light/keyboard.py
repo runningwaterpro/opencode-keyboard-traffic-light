@@ -21,9 +21,11 @@ import time
 from . import device, frame, profiles
 from .core import Light, SetKeyLight
 
-# 静态画面重发周期：不呼吸时每秒只重发一次，把 20 fps 的写入降到 1 Hz。
-# ponytail: 靠这个周期兜底「键盘会不会自己回落」；若实测证明不掉帧，可以放大到 10 秒。
-STATIC_REFRESH_S = 1.0
+# 静态画面重发周期：内容没变时的兜底重发间隔。
+# 实测（2026-10-27，wired）：只写一帧、之后不重发，灯约 2 秒就灭。
+# 所以有线必须持续刷新；取 0.5 秒留两倍余量，把 20 fps 的写入降到 2 Hz。
+# ponytail: 若哪天换成真的能保持画面的通道，这个值可以放大到分钟级。
+STATIC_REFRESH_S = 0.5
 
 
 class KeyboardLightPort:

@@ -187,18 +187,19 @@ def test_wired_opens_once_and_writes_full_frame(fake):
     assert rest == bytes(len(rest))
 
 
-def test_static_frame_is_refreshed_once_per_second(fake):
-    """静态画面不逐帧重发，但每秒兜底重发一次（防键盘自己回落）。"""
+def test_static_frame_is_refreshed_on_the_keepalive_interval(fake):
+    """静态画面不逐帧重发，但按 STATIC_REFRESH_S 兜底重发（有线约 2 秒就灭）。"""
+    step = _keyboard_module.STATIC_REFRESH_S
     fake.mode = "wired"
     port = make_port()
     port.apply([SetKeyLight("1", Light.FAILED)])
     port._step(0.0)
     port._step(0.1)
     assert len(fake.writes) == 1
-    port._step(0.6)
-    assert len(fake.writes) == 1
-    port._step(1.1)
-    assert len(fake.writes) == 2
+    port._step(0.1 + step / 2)
+    assert len(fake.writes) == 1              # 半周期内不重发
+    port._step(0.1 + step + 0.05)
+    assert len(fake.writes) == 2              # 过周期就重发
 
 
 def test_24g_asks_for_wired_once(fake, caplog):
