@@ -279,4 +279,7 @@ class WirelessLightPort:
         if reason == self._skip_reason:
             return
         self._skip_reason = reason
-        self._log.debug("无线灯口不发帧：%s", reason)
+        # 用 info 而不是 debug：默认日志级别下也要能回答「为什么这一帧没发」，
+        # 这是排查「灯停在旧状态」唯一的一手证据。
+        # 不额外调 _idle()：它是有副作用的读数函数，多读一次会改变判定。
+        self._log.info("无线灯口不发帧：%s", reason)
