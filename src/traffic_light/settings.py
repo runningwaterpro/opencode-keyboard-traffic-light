@@ -64,6 +64,8 @@ class SettingsStore:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 json.dump(asdict(settings), fh, ensure_ascii=False, indent=2)
                 fh.write("\n")
+                fh.flush()
+                os.fsync(fh.fileno())     # 先落盘再替换：断电不留空文件
             os.replace(tmp_path, self.path)
             return True
         except OSError as exc:

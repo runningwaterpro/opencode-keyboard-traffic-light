@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """多键盘调度测试：假档案 + 假端口，不碰真设备。"""
 import logging
+import threading
 from types import SimpleNamespace
 
 from traffic_light.core import Light, SetKeyLight
@@ -323,12 +324,16 @@ def test_set_wireless_enabled_false_stops_and_blocks_the_port():
     profile = FakeProfile([])
     profile.mode = "2.4g"
     hub, _ports, wireless = make_wireless_hub(profile)
+    hub.apply([SetKeyLight("1", Light.FAILED)])
     hub._reconcile(0.0)
     assert len(wireless) == 1
 
     hub.set_wireless_enabled(False)
     assert wireless[0].stopped
     assert hub._wireless is None
+    applied_before = list(wireless[0].applied)
+    hub.apply([SetKeyLight("2", Light.WAITING)])       # 关掉后不许再往无线口送
+    assert wireless[0].applied == applied_before
     for t in (2.0, 4.0):
         hub._reconcile(t)
     assert len(wireless) == 1                # 关了就不建
@@ -337,6 +342,34 @@ def test_set_wireless_enabled_false_stops_and_blocks_the_port():
     hub._reconcile(6.0)
     assert len(wireless) == 2
     assert wireless[1].started
+
+
+def test_toggle_off_while_wireless_port_is_being_created():
+    """建灯口是慢动作：建到一半被关掉，不能留下一个在跑的灯口。"""
+    profile = FakeProfile([])
+    profile.mode = "2.4g"
+    started = threading.Event()
+    release = threading.Event()
+    created = []
+
+    def slow_factory():
+        started.set()
+        release.wait(2.0)                    # 模拟枚举 + 握手
+        port = FakeWirelessPort()
+        created.append(port)
+        return port
+
+    hub = KeyboardHub(logging.getLogger("test-hub"), profile_list=[profile],
+                      wireless_factory=slow_factory, clock=lambda: 0.0)
+    worker = threading.Thread(target=hub._reconcile, args=(0.0,))
+    worker.start()
+    assert started.wait(1.0)
+    hub.set_wireless_enabled(False)          # 建到一半时关掉
+    release.set()
+    worker.join(2.0)
+
+    assert created and not created[0].started
+    assert hub._wireless is None
 
 
 def test_wireless_active_callback_fires_when_port_takes_over():

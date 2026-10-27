@@ -64,3 +64,11 @@ def test_save_leaves_no_temp_file_behind(tmp_path):
     s = store(tmp_path)
     s.save(Settings(wireless_light=False))
     assert [p.name for p in tmp_path.iterdir()] == [SETTINGS_FILE_NAME]
+
+
+def test_save_failure_returns_false_and_cleans_temp(tmp_path):
+    """写不进去（目标是个目录）：返回 False、不留临时文件、不抛异常。"""
+    target = tmp_path / SETTINGS_FILE_NAME
+    target.mkdir()
+    assert SettingsStore(target, LOG).save(Settings(wireless_light=False)) is False
+    assert [p.name for p in tmp_path.iterdir()] == [SETTINGS_FILE_NAME]

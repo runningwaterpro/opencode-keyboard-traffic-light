@@ -49,6 +49,9 @@ class KeyboardHub:
         self._wireless_factory = wireless_factory or self._make_wireless
         self._wireless_enabled = wireless_enabled
         self._on_wireless_active = on_wireless_active
+        # 无线灯口的生命周期锁：托盘线程（开关）和调度线程（建/拆）都会动它。
+        # 只在「换出引用」这种毫秒级操作上持锁，join 端口一律在锁外做。
+        self._wireless_lock = threading.Lock()
         self._wireless = None
 
         self._lock = threading.Lock()
@@ -109,7 +112,9 @@ class KeyboardHub:
     def open_count(self) -> int:
         with self._lock:
             count = sum(1 for p in self._ports.values() if p.state == "open")
-        if self._wireless is not None and self._wireless.state == "open":
+        with self._wireless_lock:
+            wireless = self._wireless
+        if wireless is not None and wireless.state == "open":
             count += 1
         return count
 
@@ -117,11 +122,15 @@ class KeyboardHub:
         """托盘开关：关掉时立刻停无线灯口，下一次调度不再建。
 
         开着不做任何事：等调度线程自己按「只有接收器」去建，避免在开关回调里
-        跑设备枚举。调用方可以来自托盘线程，所以这里只改标志 + 停端口。
+        跑设备枚举。会从托盘线程调用，所以只换标志 + 停端口，不在这里枚举设备。
         """
-        self._wireless_enabled = bool(enabled)
-        if not self._wireless_enabled:
-            self._drop_wireless()
+        with self._wireless_lock:
+            self._wireless_enabled = bool(enabled)
+            port = None if self._wireless_enabled else self._wireless
+            if port is not None:
+                self._wireless = None
+        if port is not None:
+            self._stop_wireless_port(port)
         self._log.info("无线接管：%s", "开启" if self._wireless_enabled else "关闭")
 
     # ---- 调度线程 ----
@@ -224,8 +233,9 @@ class KeyboardHub:
         return mode
 
     def _ensure_wireless(self) -> None:
-        if not self._wireless_enabled or self._wireless is not None:
-            return
+        with self._wireless_lock:
+            if not self._wireless_enabled or self._wireless is not None:
+                return
         try:
             port = self._wireless_factory()
         except Exception as exc:
@@ -233,30 +243,38 @@ class KeyboardHub:
             return
         if port is None:
             return
-        # 先挂上再重放：挂上之前的 apply 会被 hub 记录、挂上之后被转发，
-        # 中间这段窗口里没有效果会丢。
-        self._wireless = port
-        with self._lock:
-            lights = dict(self._lights)
-        if lights:
-            port.apply([SetKeyLight(key=k, light=v) for k, v in lights.items()])
-        port.start()
+        # 建灯口可能耗几百毫秒；这期间用户可能已经在托盘里把开关关掉了。
+        # 所以启动和「登记」放在同一把锁里，关掉的人只需拿锁 → 看见端口 → 停掉它。
+        with self._wireless_lock:
+            if not self._wireless_enabled or self._wireless is not None:
+                return                  # 还没 start 过，直接丢掉，不用 stop
+            with self._lock:
+                lights = dict(self._lights)
+            if lights:
+                port.apply([SetKeyLight(key=k, light=v) for k, v in lights.items()])
+            port.start()
+            self._wireless = port
         self._log.info("无线键盘接管灯光（2.4G）")
-        if self._on_wireless_active is not None:
+        if self._on_wireless_active is not None and self._wireless is port:
             try:
                 self._on_wireless_active()
             except Exception:
                 self._log.debug("on_wireless_active 回调失败", exc_info=True)
 
     def _drop_wireless(self) -> None:
-        port, self._wireless = self._wireless, None
+        with self._wireless_lock:
+            port, self._wireless = self._wireless, None
         if port is None:
             return
+        self._stop_wireless_port(port)
+        self._log.info("无线灯口已关闭")
+
+    def _stop_wireless_port(self, port) -> None:
+        """停端口（可能 join 到 2 秒）：一律在锁外做，别把调度线程卡住。"""
         try:
             port.stop()
         except Exception:
             self._log.debug("关闭无线灯口失败", exc_info=True)
-        self._log.info("无线灯口已关闭")
 
     def _enumerate(self) -> dict:
         desired = {}

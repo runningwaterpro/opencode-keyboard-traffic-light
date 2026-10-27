@@ -189,11 +189,18 @@ def _session_loop(info: ServiceInfo, state: GuardState,
 
 
 def make_wireless_notice(settings, store, notifier):
-    """一次性说明：只弹第一次，弹过就记进设置里（重启不再打扰）。"""
+    """一次性说明：只弹第一次，弹过就记进设置里（重启不再打扰）。
+
+    会被两个线程调（调度线程的「接管了」、托盘线程的「打开了」），
+    flag 的检查与置位必须在锁里，否则两次接管可能弹两个气泡。
+    """
+    guard = threading.Lock()
+
     def notice() -> None:
-        if settings.wireless_notice_shown:
-            return
-        settings.wireless_notice_shown = True
+        with guard:
+            if settings.wireless_notice_shown:
+                return
+            settings.wireless_notice_shown = True
         store.save(settings)
         notifier.send(notify_mod.NotifyRequest(kind="wireless_tip"))
     return notice

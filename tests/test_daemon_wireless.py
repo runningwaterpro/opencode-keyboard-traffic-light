@@ -126,3 +126,95 @@ def test_notice_does_not_repeat_after_a_failed_send():
         pass
     assert settings.wireless_notice_shown is True
     assert store.saved and store.saved[-1].wireless_notice_shown is True
+
+
+# ---- daemon.run 的接线（用假托盘/假键盘中枢，不连服务、不碰设备） ----
+
+def test_run_wires_persisted_setting_into_hub_and_tray(monkeypatch, tmp_path):
+    from traffic_light import daemon, runtime
+    from traffic_light.settings import SETTINGS_FILE_NAME, Settings, SettingsStore
+
+    SettingsStore(tmp_path / SETTINGS_FILE_NAME, LOG).save(
+        Settings(wireless_light=False))
+
+    monkeypatch.setattr(runtime, "DEFAULT_LOG_DIR", tmp_path)
+    monkeypatch.setattr(runtime, "setup_logging", lambda *a, **k: None)
+    monkeypatch.setattr(runtime, "acquire_single_instance", lambda: True)
+    monkeypatch.setattr(daemon, "_discover", lambda *a: None)
+
+    hub_kwargs: dict = {}
+
+    class FakeHub:
+        def __init__(self, *args, **kwargs):
+            hub_kwargs.update(kwargs)
+            hub_kwargs["instance"] = self
+            self.enabled = []
+            self.stopped = False
+
+        def start(self):
+            hub_kwargs["started"] = True
+
+        def stop(self):
+            self.stopped = True
+
+        def apply(self, effects):
+            pass
+
+        @property
+        def open_count(self):
+            return 0
+
+        def set_wireless_enabled(self, enabled):
+            self.enabled.append(enabled)
+
+    monkeypatch.setattr(daemon, "KeyboardHub", FakeHub)
+
+    tray_kwargs: dict = {}
+
+    class FakeTray:
+        def __init__(self, *args, **kwargs):
+            tray_kwargs.update(kwargs)
+            self.available = True
+            self.balloons = []
+
+        def start(self):
+            pass
+
+        def close(self):
+            pass
+
+        def update(self, *args, **kwargs):
+            pass
+
+        def balloon(self, title, body, level="info"):
+            self.balloons.append((title, body))
+
+        def set_on_wireless_toggle(self, callback):
+            tray_kwargs["toggle"] = callback
+
+    monkeypatch.setattr(daemon.tray_mod, "TrayIcon", FakeTray)
+
+    class FakeNotifier:
+        def __init__(self):
+            self.sent = []
+
+        def send(self, req):
+            self.sent.append(req)
+
+    notifier = FakeNotifier()
+    monkeypatch.setattr(daemon.notify_mod, "create_notifier",
+                        lambda *a, **k: notifier)
+
+    assert daemon.run(tmp_path / "service.json") == 0
+
+    # 存盘里的「关」必须原样交给两条通道，否则重启后开关就是假的
+    assert hub_kwargs["wireless_enabled"] is False
+    assert tray_kwargs["wireless_light"] is False
+    assert hub_kwargs["started"] is True
+    assert callable(tray_kwargs["toggle"])
+
+    # 点开：写盘 + 通知中枢 + 弹一次说明
+    tray_kwargs["toggle"](True)
+    assert hub_kwargs["instance"].enabled == [True]
+    assert SettingsStore(tmp_path / SETTINGS_FILE_NAME, LOG).load().wireless_light is True
+    assert [r.kind for r in notifier.sent] == ["wireless_tip"]
