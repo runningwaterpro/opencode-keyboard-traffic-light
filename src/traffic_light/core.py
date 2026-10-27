@@ -13,7 +13,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 WAITING_MIN_VISIBLE_MS = 500
-IDLE_VISIBLE_MS = 30_000  # 完成确认绿灯的显示窗口；到期即灭
+IDLE_VISIBLE_MS = 60_000        # 完成确认绿灯；到期即灭
+WAITING_MAX_MS = 600_000        # 键盘黄灯最长 10 分钟，之后交给托盘
+FAILED_MAX_MS = 300_000         # 键盘红灯最长 5 分钟，之后交给托盘
 FAILED_REASONS = ("shutdown", "inactivity")
 SLOT_KEYS = ("1", "2", "3", "4", "5", "6", "7", "8", "9", "0")
 COMPLETION_MIN_RUN_MS = 5000
@@ -57,6 +59,7 @@ class SessionState:
     failed: bool = False
     pending: dict[str, str] = field(default_factory=dict)
     waiting_visible_until: int = 0
+    waiting_since_ms: int | None = None   # 本轮等待开始时刻；黄灯显示上限用它
     slot: str | None = None
     first_seen_ms: int = 0
     run_started_ms: int | None = None
@@ -76,14 +79,29 @@ class SessionState:
             return Light.RUNNING
         return Light.IDLE
 
-    def light(self, now_ms: int) -> Light:
-        """显示灯态：完成后的绿只在窗口内亮，其余空闲一律灭。"""
+    def light(self, now_ms: int, keyboard: bool = False) -> Light:
+        """显示灯态：完成后的绿只在窗口内亮，其余空闲一律灭。
+
+        keyboard=True 是「键盘视图」：执行中不亮，黄/红有显示上限。
+        托盘仍用不带 keyboard 的版本——它负责长期记账，不能被这些上限抹掉。
+        """
         kind = self.settled_light(now_ms)
-        if kind is not Light.IDLE:
+        if kind is Light.IDLE:
+            if self.completed_ms is not None and now_ms - self.completed_ms < IDLE_VISIBLE_MS:
+                return Light.IDLE
+            return Light.OFF
+        if not keyboard:
             return kind
-        if self.completed_ms is not None and now_ms - self.completed_ms < IDLE_VISIBLE_MS:
-            return Light.IDLE
-        return Light.OFF
+        if kind is Light.WAITING:
+            if (self.pending and self.waiting_since_ms is not None
+                    and now_ms - self.waiting_since_ms >= WAITING_MAX_MS):
+                return Light.OFF
+            return kind
+        if kind is Light.FAILED:
+            if (self.failed_since_ms is not None
+                    and now_ms - self.failed_since_ms >= FAILED_MAX_MS):
+                return Light.OFF
+        return kind
 
 
 def project_name(directory: str | None) -> str | None:
@@ -107,7 +125,8 @@ class GuardState:
                 children.setdefault(s.parent_id, []).append(s.session_id)
         return children
 
-    def group_light(self, sid: str, now_ms: int, children: dict[str, list[str]] | None = None) -> Light:
+    def group_light(self, sid: str, now_ms: int, children: dict[str, list[str]] | None = None,
+                    keyboard: bool = False) -> Light:
         """sid 组（自己 + 全部后裔）的最高优先级灯态。"""
         if children is None:
             children = self._children_map()
@@ -122,7 +141,7 @@ class GuardState:
             m = self.sessions.get(cur)
             if m is None:
                 continue
-            lv = m.light(now_ms)
+            lv = m.light(now_ms, keyboard=keyboard)
             if _PRIORITY[lv] > _PRIORITY[best]:
                 best = lv
             stack.extend(children.get(cur, ()))
@@ -227,11 +246,13 @@ class GuardState:
                 s.failed_since_ms = None
 
     def render_lights(self, now_ms: int) -> dict[str, Light]:
+        """键盘视图：执行中不亮，黄/红有上限（托盘用 state.display，不受这些限制）。"""
         children = self._children_map()
         out: dict[str, Light] = {}
         for s in self.sessions.values():
             if s.slot:
-                out[s.slot] = self.group_light(s.session_id, now_ms, children)
+                out[s.slot] = self.group_light(s.session_id, now_ms, children,
+                                               keyboard=True)
         return out
 
 def _notify(state: GuardState, kind: str, sid: str, effects: list, detail: str | None = None) -> None:
@@ -505,6 +526,7 @@ def apply_snapshot(state: GuardState, snap: Snapshot, now_ms: int) -> list:
         s.pending = dict(inst.pending)
         if s.pending and not had:
             s.waiting_visible_until = now_ms + WAITING_MIN_VISIBLE_MS
+            s.waiting_since_ms = now_ms
         if inst.running and s.run_started_ms is None:
             s.run_started_ms = now_ms
     _refresh(state, now_ms, effects)
@@ -532,6 +554,7 @@ def _begin_pending(s: SessionState, kind: str, request_id: str, now_ms: int) -> 
     s.pending[request_id] = kind
     if not had:
         s.waiting_visible_until = now_ms + WAITING_MIN_VISIBLE_MS
+        s.waiting_since_ms = now_ms
 
 
 def _refresh(state: GuardState, now_ms: int, effects: list) -> None:
@@ -548,7 +571,10 @@ def _refresh(state: GuardState, now_ms: int, effects: list) -> None:
             else:
                 state.rendered[key] = new
     best = Light.OFF
-    for lv in state.rendered.values():
-        if _PRIORITY[lv] > _PRIORITY[best]:
-            best = lv
+    children = state._children_map()
+    for s in state.sessions.values():
+        if s.slot:
+            lv = state.group_light(s.session_id, now_ms, children)   # 不带上限：托盘记账
+            if _PRIORITY[lv] > _PRIORITY[best]:
+                best = lv
     state.display = best

@@ -109,7 +109,8 @@ def render_slots(slots: dict[str, Light], breath: float
     for name, light in slots.items():
         if name not in NUMBER_ROW_LED:
             raise ValueError("未知的数字键名 %r（合法：1..9、0）" % (name,))
-        if light is Light.OFF:
+        if light is Light.OFF or light is Light.RUNNING:
+            # 执行中不点亮：它不触发任何你要做的动作，亮着只会稀释信号。
             continue
         if light is Light.WAITING:
             base = COLORS[Light.WAITING]

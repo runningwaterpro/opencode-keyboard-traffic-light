@@ -21,6 +21,10 @@ import time
 from . import device, frame, profiles
 from .core import Light, SetKeyLight
 
+# 静态画面重发周期：不呼吸时每秒只重发一次，把 20 fps 的写入降到 1 Hz。
+# ponytail: 靠这个周期兜底「键盘会不会自己回落」；若实测证明不掉帧，可以放大到 10 秒。
+STATIC_REFRESH_S = 1.0
+
 
 class KeyboardLightPort:
     """把 SetKeyLight 效果变成机型帧，发给有线连接的键盘配置通道。"""
@@ -46,6 +50,10 @@ class KeyboardLightPort:
         self._state = "idle"
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+
+        # 静态画面去重：内容没变就不重发，省掉 20 Hz 的 HID 写入。
+        self._last_payload = None
+        self._last_write_at = 0.0
 
         # 周期检查时间表：-inf 表示「第一次 _step 立即查一次」。
         self._next_oem_check = float("-inf")
@@ -206,6 +214,8 @@ class KeyboardLightPort:
             return
         self._state = "open"
         self._failure_kind = None
+        self._last_payload = None      # 新句柄必须马上写一帧，不能沿用旧缓存
+        self._last_write_at = 0.0
         self._log_once("connected", "键盘已连接（wired）")
 
     def _notify_wired_needed(self) -> None:
@@ -224,10 +234,19 @@ class KeyboardLightPort:
         with self._lock:
             lights = dict(self._lights)  # 加锁取副本：apply 在主循环线程写
         payload = self._profile.render(lights, int(now * 1000))
+        # 只有黄在呼吸时才需要 20 fps；其余状态内容不变就只按秒重发。
+        breathing = (self._profile.capability.breathing
+                     and any(lv is Light.WAITING for lv in lights.values()))
+        if (not breathing and payload == self._last_payload
+                and now - self._last_write_at < STATIC_REFRESH_S):
+            return
         try:
             self._profile.write(self._handle, payload)
         except Exception as exc:
             self._handle_failure(exc)
+            return
+        self._last_payload = bytes(payload)
+        self._last_write_at = now
 
     def _handle_failure(self, exc: Exception) -> None:
         """发帧失败：关句柄，再判通道是否还在。

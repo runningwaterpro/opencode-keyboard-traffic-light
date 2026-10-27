@@ -48,11 +48,46 @@ def test_silent_interrupt_goes_dark_immediately():
         assert lights(eff) == [Light.OFF], reason
 
 
-def test_shutdown_interrupt_stays_red_without_decay():
+def test_shutdown_interrupt_keeps_red_on_tray_after_keyboard_expires():
+    """键盘红灯 5 分钟后灭，但托盘（display）继续红：键盘只负责打断。"""
+    from traffic_light.core import FAILED_MAX_MS
+
     s = run_and_succeed()
     assert lights(feed(s, "session.execution.interrupted", T0 + 50, reason="shutdown")) == [Light.FAILED]
+    assert tick(s, T0 + 50 + FAILED_MAX_MS - 1) == []
+    assert s.display is Light.FAILED
+    assert lights(tick(s, T0 + 50 + FAILED_MAX_MS)) == [Light.OFF]   # 键盘灭
+    assert s.display is Light.FAILED                                  # 托盘仍红
     assert tick(s, T0 + 50 + 24 * 3600 * 1000) == []
     assert s.display is Light.FAILED
+
+
+def test_waiting_expires_on_keyboard_after_ten_minutes():
+    """黄亮满 10 分钟就交棒给托盘；补帧不必无限做下去。"""
+    from traffic_light.core import WAITING_MAX_MS
+
+    s = GuardState()
+    feed(s, "session.created", T0)
+    assert lights(feed(s, "permission.asked", T0, request_id="p")) == [Light.WAITING]
+    assert tick(s, T0 + WAITING_MAX_MS - 1) == []
+    assert s.display is Light.WAITING
+    assert lights(tick(s, T0 + WAITING_MAX_MS)) == [Light.OFF]
+    assert s.display is Light.WAITING         # 还在等你，托盘不能黑
+
+
+def test_answering_after_expiry_lights_up_again():
+    """10 分钟后灯灭了，但新的一次询问重新点灯：上限按「本轮等待」算，不是永久封杀。"""
+    from traffic_light.core import WAITING_MAX_MS
+
+    s = GuardState()
+    feed(s, "session.created", T0)
+    feed(s, "permission.asked", T0, request_id="p1")
+    tick(s, T0 + WAITING_MAX_MS)
+    assert s.rendered == {}
+    assert lights(feed(s, "permission.replied", T0 + WAITING_MAX_MS + 10,
+                       request_id="p1")) == []
+    assert lights(feed(s, "permission.asked", T0 + WAITING_MAX_MS + 20,
+                       request_id="p2")) == [Light.WAITING]
 
 
 def test_snapshot_rebuild_clears_green():

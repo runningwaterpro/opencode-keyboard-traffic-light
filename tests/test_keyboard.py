@@ -164,24 +164,41 @@ def payload_of(fake_module, index=-1):
 
 
 def test_wired_opens_once_and_writes_full_frame(fake):
-    """wired：打开恰一次；520 字节、帧头正确、键 1 亮紫、其余 LED 全灭。"""
+    """wired：打开恰一次；520 字节、帧头正确、键 1 亮红、其余 LED 全灭。
+
+    静态画面只写一次（20 Hz 去重），所以三个 tick 只产生一帧。
+    """
     fake.mode = "wired"
     port = make_port()
-    port.apply([SetKeyLight("1", Light.RUNNING)])
+    port.apply([SetKeyLight("1", Light.FAILED)])
     port._step(0.0)
     assert port._state == "open"
     assert fake.calls.count("open_exclusive") == 1
     for t in (0.05, 0.10, 0.15):
         port._step(t)
     assert fake.calls.count("open_exclusive") == 1   # 已打开，不重复打开
-    assert len(fake.writes) == 3
+    assert len(fake.writes) == 1                     # 内容没变就不重发
     handle, payload = fake.writes[-1]
     assert isinstance(handle, int) and handle > 0
     assert len(payload) == frame.FRAME_LENGTH == 520
     assert payload[:8] == frame.HEADER
-    assert tuple(payload[LED1:LED1 + 3]) == frame.COLORS[Light.RUNNING]
+    assert tuple(payload[LED1:LED1 + 3]) == frame.COLORS[Light.FAILED]
     rest = payload[frame.PAYLOAD_OFFSET:LED1] + payload[LED1 + 3:]
     assert rest == bytes(len(rest))
+
+
+def test_static_frame_is_refreshed_once_per_second(fake):
+    """静态画面不逐帧重发，但每秒兜底重发一次（防键盘自己回落）。"""
+    fake.mode = "wired"
+    port = make_port()
+    port.apply([SetKeyLight("1", Light.FAILED)])
+    port._step(0.0)
+    port._step(0.1)
+    assert len(fake.writes) == 1
+    port._step(0.6)
+    assert len(fake.writes) == 1
+    port._step(1.1)
+    assert len(fake.writes) == 2
 
 
 def test_24g_asks_for_wired_once(fake, caplog):
@@ -255,17 +272,17 @@ def test_write_failure_channel_gone_suspends_then_recovers(fake, caplog):
     caplog.set_level(logging.INFO)
     fake.mode = "wired"
     port = make_port()
-    port.apply([SetKeyLight("1", Light.RUNNING)])
+    port.apply([SetKeyLight("1", Light.FAILED)])
     port._step(0.0)
     port._step(0.1)
     assert len(fake.writes) == 1
     fake.write_fail = True
     fake.channel_gone = True
-    port._step(0.2)
+    port._step(1.2)          # 越过静态重发周期，逼出一次真实写入
     assert port._state == "suspended"
     assert port._handle is None
     assert len(fake.closed) == 1
-    port._step(0.3)
+    port._step(1.3)
     assert port._state == "suspended"     # 断线期间保持等待
     assert len(fake.writes) == 1
     fake.mode = "none"                    # 线拔着：设备报 none
@@ -280,7 +297,7 @@ def test_write_failure_channel_gone_suspends_then_recovers(fake, caplog):
     assert fake.calls.count("open_exclusive") == 2
     port._step(4.1)
     assert len(fake.writes) == 2
-    assert tuple(payload_of(fake)[LED1:LED1 + 3]) == frame.COLORS[Light.RUNNING]
+    assert tuple(payload_of(fake)[LED1:LED1 + 3]) == frame.COLORS[Light.FAILED]
     assert sum("键盘离线，等待恢复" in m for m in msgs(caplog)) == 1
 
 
@@ -290,13 +307,13 @@ def test_write_failure_channel_present_disables_forever(fake, caplog, exc_kind):
     caplog.set_level(logging.INFO)
     fake.mode = "wired"
     port = make_port()
-    port.apply([SetKeyLight("1", Light.RUNNING)])
+    port.apply([SetKeyLight("1", Light.FAILED)])
     port._step(0.0)
     port._step(0.1)
     fake.write_fail = True
     fake.write_exc = (_FakeDeviceError("HidD_SetFeature 失败：桩")
                       if exc_kind == "device" else RuntimeError("驱动炸了"))
-    port._step(0.2)
+    port._step(1.2)          # 越过静态重发周期，逼出一次真实写入
     assert port._state == "disabled"
     assert port._handle is None
     assert len(fake.closed) == 1
@@ -353,13 +370,13 @@ def test_apply_off_removes_light_and_ignores_junk(fake):
     """OFF 把该键从灯表移除（帧里回全 0）；非 SetKeyLight 效果忽略。"""
     fake.mode = "wired"
     port = make_port()
-    port.apply([SetKeyLight("1", Light.RUNNING)])
+    port.apply([SetKeyLight("1", Light.FAILED)])
     port._step(0.0)
     port._step(0.1)
-    assert tuple(payload_of(fake)[LED1:LED1 + 3]) == frame.COLORS[Light.RUNNING]
+    assert tuple(payload_of(fake)[LED1:LED1 + 3]) == frame.COLORS[Light.FAILED]
     port.apply(["不是效果", object()])
     port._step(0.2)
-    assert tuple(payload_of(fake)[LED1:LED1 + 3]) == frame.COLORS[Light.RUNNING]
+    assert tuple(payload_of(fake)[LED1:LED1 + 3]) == frame.COLORS[Light.FAILED]
     port.apply([SetKeyLight("1", Light.OFF)])
     assert "1" not in port._lights
     port._step(0.3)

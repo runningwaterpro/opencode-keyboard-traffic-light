@@ -152,9 +152,10 @@ def test_render_slots_off_disappears():
 
 
 def test_render_slots_maps_four_states_to_their_colors():
+    """执行中不点亮：RUNNING 不出现在结果里，其余三色照常。"""
     slots = {"1": Light.RUNNING, "2": Light.FAILED, "3": Light.IDLE}
-    assert render_slots(slots, 1.0) == {7: RUNNING_RGB, 13: FAILED_RGB,
-                                       19: IDLE_RGB}
+    assert render_slots(slots, 1.0) == {13: FAILED_RGB, 19: IDLE_RGB}
+    assert render_slots({"1": Light.RUNNING}, 1.0) == {}
 
 
 def test_render_slots_colors_table_is_frozen():
@@ -251,7 +252,7 @@ def test_rendered_slots_to_frame_end_to_end():
     assert list(frame[:8]) == HEADER_BYTES
     assert payload(frame, NUMBER_ROW_LED["1"]) == [0, 200, 0]
     assert payload(frame, NUMBER_ROW_LED["2"]) == [255, 0, 0]
-    assert payload(frame, NUMBER_ROW_LED["5"]) == [128, 0, 255]
+    assert payload(frame, NUMBER_ROW_LED["5"]) == [0, 0, 0]   # 执行中不亮
     assert payload(frame, NUMBER_ROW_LED["0"]) == [127, 105, 0]
     assert payload(frame, NUMBER_ROW_LED["9"]) == [0, 0, 0]
     # 除渲染表给出的 LED 外，0..95 全黑（不许写到别的键上）
