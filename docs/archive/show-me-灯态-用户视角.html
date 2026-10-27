@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>键盘灯应该怎么亮：站在用户角度的解释</title>
+<style>
+  :root{
+    --bg:#0d0f12; --panel:#16191d; --line:#242a31;
+    --text:#e7e9ec; --muted:#8b929c; --dim:#6d7681;
+    --yellow:#ffc93c; --red:#ff4d4d; --green:#33d17a;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; padding:40px 28px 64px;
+    background:var(--bg); color:var(--text);
+    font-family:"Microsoft YaHei","PingFang SC",-apple-system,sans-serif;
+    font-size:15px; line-height:1.75;
+  }
+  .wrap{max-width:860px; margin:0 auto}
+
+  h1{font-size:23px; margin:0 0 10px; font-weight:600; letter-spacing:.2px}
+  .lede{color:var(--muted); font-size:15px; margin:0 0 40px}
+  .lede b{color:var(--text); font-weight:600}
+
+  h2{
+    font-size:13px; letter-spacing:1px; color:var(--dim);
+    font-weight:600; margin:0 0 18px;
+  }
+  section{margin-bottom:44px}
+
+  /* ---- narrative ---- */
+  .story{border-left:1px solid var(--line); margin-left:8px; padding-left:26px}
+  .beat{position:relative; padding:0 0 26px}
+  .beat:last-child{padding-bottom:0}
+  .beat::before{
+    content:""; position:absolute; left:-31px; top:9px;
+    width:9px; height:9px; border-radius:50%;
+    background:#2a3138; border:1px solid #39424c;
+  }
+  .beat.lit-y::before{background:var(--yellow); border-color:var(--yellow); box-shadow:0 0 10px rgba(255,201,60,.5)}
+  .beat.lit-r::before{background:var(--red); border-color:var(--red); box-shadow:0 0 10px rgba(255,77,77,.45)}
+  .beat.lit-g::before{background:var(--green); border-color:var(--green); box-shadow:0 0 10px rgba(51,209,122,.45)}
+  .who{font-size:12px; color:var(--dim); letter-spacing:.3px}
+  .what{margin:2px 0 0}
+  .what b{font-weight:600}
+  .k{
+    display:inline-flex; align-items:center; justify-content:center;
+    min-width:20px; height:20px; padding:0 5px; margin:0 2px;
+    border-radius:4px; border:1px solid var(--line);
+    font-size:12px; font-weight:600; vertical-align:1px;
+  }
+  .k.y{background:var(--yellow); color:#0b0c0e; border-color:var(--yellow)}
+  .k.r{background:var(--red); color:#1a0c0c; border-color:var(--red)}
+  .k.g{background:var(--green); color:#08150e; border-color:var(--green)}
+  .k.dark{background:#14181d; color:var(--dim)}
+
+  /* ---- reasons ---- */
+  .cards{display:grid; grid-template-columns:repeat(3,1fr); gap:14px}
+  @media (max-width:760px){ .cards{grid-template-columns:1fr} }
+  .card{
+    background:var(--panel); border:1px solid var(--line);
+    border-radius:10px; padding:18px 18px 16px;
+  }
+  .card .n{font-size:12px; color:var(--dim); letter-spacing:.6px; margin-bottom:8px}
+  .card h3{font-size:15px; margin:0 0 8px; font-weight:600}
+  .card p{margin:0; font-size:13.5px; color:var(--muted); line-height:1.7}
+
+  /* ---- compare ---- */
+  table{width:100%; border-collapse:collapse; font-size:14px}
+  th,td{text-align:left; padding:12px 14px; border-bottom:1px solid var(--line); vertical-align:top}
+  th{font-size:12px; color:var(--dim); font-weight:500; letter-spacing:.4px}
+  td:first-child{color:var(--muted); width:26%}
+  .same{color:var(--muted)}
+  .diff{color:var(--yellow)}
+
+  .callout{
+    background:#101317; border:1px solid var(--line); border-left:2px solid var(--yellow);
+    border-radius:0 8px 8px 0; padding:16px 18px; margin-top:20px;
+    font-size:14px; color:var(--muted);
+  }
+  .callout b{color:var(--text); font-weight:600}
+
+  .cost{display:grid; grid-template-columns:1fr 1fr; gap:14px}
+  @media (max-width:760px){ .cost{grid-template-columns:1fr} }
+  .cost ul{margin:0; padding-left:18px; font-size:13.5px; color:var(--muted)}
+  .cost li{margin-bottom:7px}
+  .cost li b{color:var(--text); font-weight:600}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>键盘灯，凭什么亮</h1>
+  <p class="lede">
+    它不负责告诉你系统在干什么，只负责做一件事：<b>在需要你的时候，把你叫回来。</b>
+    所以判断标准只有一条 —— 此刻你要不要动手。
+  </p>
+
+  <section>
+    <h2>你的一天</h2>
+    <div class="story">
+
+      <div class="beat">
+        <div class="who">09:10</div>
+        <p class="what">你丢了三件事给它跑，然后切去写别的文档。键盘
+          <span class="k dark">1</span><span class="k dark">2</span><span class="k dark">3</span>
+          全黑。</p>
+      </div>
+
+      <div class="beat lit-y">
+        <div class="who">09:14</div>
+        <p class="what">第 5 个会话停下来问你要权限。<span class="k y">5</span>
+          <b>亮黄，一直亮到你处理。</b></p>
+      </div>
+
+      <div class="beat">
+        <div class="who">09:16</div>
+        <p class="what">你批了。<span class="k dark">5</span> 灭。它继续跑，键盘还是黑的。</p>
+      </div>
+
+      <div class="beat lit-r">
+        <div class="who">09:22</div>
+        <p class="what">第 7 个会话跑挂了。<span class="k r">7</span>
+          <b>亮红，5 分钟。</b>够你抬头看见，不够它一直吵你。</p>
+      </div>
+
+      <div class="beat lit-g">
+        <div class="who">09:26</div>
+        <p class="what">第 3 个跑完了。<span class="k g">3</span>
+          <b>亮绿，1 分钟。</b>只是告诉你「这单结了」，没别的意思。</p>
+      </div>
+
+      <div class="beat">
+        <div class="who">09:30</div>
+        <p class="what">你去泡咖啡。键盘全黑。桌上那块小托盘仍然亮着，告诉你还有一单在跑。</p>
+      </div>
+
+    </div>
+  </section>
+
+  <section>
+    <h2>为什么这样是对的</h2>
+    <div class="cards">
+      <div class="card">
+        <div class="n">理由一</div>
+        <h3>灯一亮，就必须真的有事</h3>
+        <p>如果平时也有灯亮着，你很快就会学会不看它。等到真有事，那盏灯也喊不动你了。
+           所以「平时全黑」不是抠门，是让那一下亮起来值钱。</p>
+      </div>
+      <div class="card">
+        <div class="n">理由二</div>
+        <h3>只按「你要不要动手」分级</h3>
+        <p>它在跑，你没事可做 —— 不亮。
+           它在等你，你不动就走不下去 —— 亮。
+           这不是简化，是去掉了一切不改变你行为的信息。</p>
+      </div>
+      <div class="card">
+        <div class="n">理由三</div>
+        <h3>键盘负责叫你，托盘负责记账</h3>
+        <p>键盘短促、显眼、会消失；托盘安静、一直在、能回查。
+           两件事分开做，各自才做得好。</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>有线 和 2.4G，你能看到的不同只有一处</h2>
+    <table>
+      <tr><th></th><th>有线</th><th>2.4G 无线</th></tr>
+      <tr>
+        <td>黄灯的表现</td>
+        <td class="diff">一明一暗地呼吸</td>
+        <td class="diff">常亮</td>
+      </tr>
+      <tr><td>什么颜色、哪个键、亮多久</td><td class="same">完全一样</td><td class="same">完全一样</td></tr>
+      <tr><td>平时是不是黑的</td><td class="same">是</td><td class="same">是</td></tr>
+      <tr><td>打字时会不会卡</td><td class="same">不会</td><td class="same">不会（它这时根本不碰键盘）</td></tr>
+    </table>
+
+    <div class="callout">
+      <b>为什么无线不能呼吸？</b>
+      因为无线时每改一次灯，整把键盘会黑一下再亮——大约一秒。
+      想做出呼吸，就得一秒改好几次，看起来不是呼吸，是抽搐。
+      而每次改灯还可能吞掉你一个按键。所以无线下黄灯保持常亮，宁可少一点花样。
+    </div>
+  </section>
+
+  <section>
+    <h2>代价，得说清楚</h2>
+    <div class="cost">
+      <div>
+        <ul>
+          <li><b>看不出有没有在跑。</b>键盘全黑时，「闲着」和「正在跑」长得一样。这活交给托盘。</li>
+          <li><b>灯灭了有两种可能。</b>没事，或者无线断开了。所以托盘必须能区分连没连上。</li>
+        </ul>
+      </div>
+      <div>
+        <ul>
+          <li><b>键盘自己的灯效会被接管。</b>用了它，键盘只剩数字行听我们的，别处是黑的。</li>
+          <li><b>失败可能被你错过。</b>红灯 5 分钟后会灭，之后只剩托盘上一个小点。</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+</div>
+</body>
+</html>

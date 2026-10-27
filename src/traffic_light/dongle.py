@@ -2,7 +2,7 @@
 """2.4G 接收器协议 I/O：枚举接收器、19 字节包、27 包逐包 ACK、378 字节三平面缓冲。
 
 本模块只负责「怎么发」，不决定「什么时候发」——发送时机在 wireless.py。
-实现从 tools/dongle_probe/dongle_led.py 迁移（七轮真机实测通过），只改三处：
+实现从 tools/verify/dongle_probe/dongle_led.py 迁移（七轮真机实测通过），只改三处：
 
   1. 删掉 1.5 秒周期重发（hold_colors）：实测单帧可保持约 60 秒，高频重发还会丢按键；
   2. print 改成抛 DongleError，日志归调用方；

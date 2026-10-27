@@ -146,5 +146,5 @@ powershell -ExecutionPolicy Bypass -File tools\uninstall_autostart.ps1
 | `tray.py` | 托盘图标与菜单 |
 | `keyboard_hub.py` | 多键盘调度、热插拔、故障隔离 |
 
-排查工具在 `tools/`：`probe_keyboard.py` 看设备、`probe_keystate.py` 看键盘活动、
-`wired_walkthrough.py` 在真机上走一遍灯态。
+排查工具在 `tools/verify/`：`probe_keyboard.py` 看设备、`probe_keystate.py` 看键盘活动、
+`wired_walkthrough.py` 在真机上走一遍灯态。索引见该目录的 `README.md`。

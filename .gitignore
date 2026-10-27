@@ -1,3 +1,9 @@
-__pycache__/
+﻿__pycache__/
 *.py[cod]
 .pytest_cache/
+
+# 验证脚本的运行输出（带时间戳，属于证据不是代码）
+tools/verify/dongle_probe/logs/
+
+# 本地快捷方式（每台机器自己生成）
+*.lnk
