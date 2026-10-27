@@ -34,12 +34,38 @@ class FakeProfile:
 
     def __init__(self, infos):
         self.infos = list(infos)
+        self.mode = "none"
+        self.detect_exc = None
 
     def list_channels(self, devices=None):
         return list(self.infos)
 
     def detect_mode(self, devices=None):
-        return "none"
+        if self.detect_exc is not None:
+            raise self.detect_exc
+        return self.mode
+
+
+class FakeWirelessPort:
+    """无线灯口的替身：只记外部可见的动作。"""
+
+    def __init__(self):
+        self.state = "waiting"
+        self.applied = []
+        self.started = False
+        self.stopped = False
+        self.failure_kind = None
+
+    def apply(self, effects):
+        self.applied.extend(effects)
+
+    def start(self):
+        self.started = True
+        self.state = "open"
+
+    def stop(self):
+        self.stopped = True
+        self.state = "closed"
 
 
 def info(path):
@@ -57,6 +83,28 @@ def make_hub(profile_list, clock=None):
     hub = KeyboardHub(logging.getLogger("test-hub"), profile_list=profile_list,
                       port_factory=factory, clock=clock or (lambda: 0.0))
     return hub, ports
+
+
+def make_wireless_hub(profile, clock=None, **kwargs):
+    """带假无线灯口的 hub；返回 (hub, 有线端口表, 创建过的无线端口列表)。"""
+    ports = {}
+    wireless = []
+
+    def port_factory(path, prof):
+        port = FakePort(path, prof)
+        ports[path] = port
+        return port
+
+    def wireless_factory():
+        port = FakeWirelessPort()
+        wireless.append(port)
+        return port
+
+    hub = KeyboardHub(logging.getLogger("test-hub"), profile_list=[profile],
+                      port_factory=port_factory,
+                      wireless_factory=wireless_factory,
+                      clock=clock or (lambda: 0.0), **kwargs)
+    return hub, ports, wireless
 
 
 def test_no_devices_no_ports():
@@ -166,3 +214,132 @@ def test_unverified_profile_is_never_driven():
     assert hub._profiles() == []
     hub._reconcile(0.0)
     assert hub._ports == {}
+
+
+# ---- 无线通道（2.4G） ----
+
+def test_24g_only_creates_wireless_port_and_replays_lights():
+    """只插接收器：建无线灯口、启动、并把当前灯态重放过去。"""
+    profile = FakeProfile([])
+    profile.mode = "2.4g"
+    hub, _ports, wireless = make_wireless_hub(profile)
+    hub.apply([SetKeyLight("1", Light.FAILED)])
+    hub._reconcile(0.0)
+    assert len(wireless) == 1
+    port = wireless[0]
+    assert port.started
+    assert port.applied == [SetKeyLight("1", Light.FAILED)]
+    assert hub.open_count == 1
+
+
+def test_wireless_gets_later_effects():
+    profile = FakeProfile([])
+    profile.mode = "2.4g"
+    hub, _ports, wireless = make_wireless_hub(profile)
+    hub._reconcile(0.0)
+    effect = SetKeyLight("2", Light.WAITING)
+    hub.apply([effect])
+    assert wireless[0].applied == [effect]
+
+
+def test_wireless_is_created_once_not_every_reconcile():
+    profile = FakeProfile([])
+    profile.mode = "2.4g"
+    hub, _ports, wireless = make_wireless_hub(profile)
+    for t in (0.0, 2.0, 4.0, 6.0):
+        hub._reconcile(t)
+    assert len(wireless) == 1
+
+
+def test_wired_channel_takes_over_and_stops_wireless():
+    """有线优先：配置通道一出现就停掉无线灯口（2.4G 写入此时会假成功）。"""
+    profile = FakeProfile([])
+    profile.mode = "2.4g"
+    hub, ports, wireless = make_wireless_hub(profile)
+    hub._reconcile(0.0)
+
+    profile.mode = "wired"
+    profile.infos = [info("p1")]
+    hub._reconcile(2.0)
+    assert wireless[0].stopped
+    assert hub._wireless is None
+    assert "p1" in ports and ports["p1"].started
+
+
+def test_wireless_stays_off_while_wired_is_present():
+    profile = FakeProfile([info("p1")])
+    profile.mode = "wired"
+    hub, ports, wireless = make_wireless_hub(profile)
+    for t in (0.0, 2.0, 4.0):
+        hub._reconcile(t)
+    assert wireless == []
+    assert set(ports) == {"p1"}
+
+
+def test_detect_error_does_not_tear_down_wireless():
+    """枚举失败不是设备事实：已建好的无线灯口不许拆，否则每 2 秒重建一次。"""
+    profile = FakeProfile([])
+    profile.mode = "2.4g"
+    hub, _ports, wireless = make_wireless_hub(profile)
+    hub._reconcile(0.0)
+    profile.detect_exc = RuntimeError("枚举失败")
+    for t in (2.0, 4.0):
+        hub._reconcile(t)
+    assert len(wireless) == 1
+    assert not wireless[0].stopped
+    assert hub._wireless is wireless[0]
+
+
+def test_no_device_tears_down_wireless():
+    """接收器拔掉（模式变 none）：无线灯口关掉，不空转重试。"""
+    profile = FakeProfile([])
+    profile.mode = "2.4g"
+    hub, _ports, wireless = make_wireless_hub(profile)
+    hub._reconcile(0.0)
+    profile.mode = "none"
+    hub._reconcile(2.0)
+    assert wireless[0].stopped
+    assert hub._wireless is None
+
+
+def test_switch_off_keeps_old_behaviour(caplog):
+    """无线接管关掉：不建灯口，退回「只提示一次请换有线」。"""
+    caplog.set_level(logging.INFO)
+    asked = []
+    profile = FakeProfile([])
+    profile.mode = "2.4g"
+    hub, _ports, wireless = make_wireless_hub(
+        profile, wireless_enabled=False, on_wired_needed=lambda: asked.append(1))
+    for t in (0.0, 2.0, 4.0):
+        hub._reconcile(t)
+    assert wireless == []
+    assert asked == [1]
+    assert sum("只检测到 2.4G 接收器" in r.getMessage()
+               for r in caplog.records) == 1
+
+
+def test_suspended_wired_port_does_not_block_wireless():
+    """拔线后有线端口进入 suspended：这不是「有线还在」，否则 2.4G 永远不亮。"""
+    profile = FakeProfile([info("p1")])
+    profile.mode = "wired"
+    hub, ports, wireless = make_wireless_hub(profile)
+    hub._reconcile(0.0)
+    assert wireless == []
+
+    ports["p1"].state = "suspended"
+    profile.mode = "2.4g"
+    profile.infos = []
+    hub._reconcile(2.0)
+    assert len(wireless) == 1
+    assert wireless[0].started
+    assert not wireless[0].stopped
+    assert hub.open_count == 1
+
+
+def test_stop_closes_wireless_port():
+    profile = FakeProfile([])
+    profile.mode = "2.4g"
+    hub, _ports, wireless = make_wireless_hub(profile)
+    hub._reconcile(0.0)
+    hub.stop()
+    assert wireless[0].stopped
