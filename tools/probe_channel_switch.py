@@ -11,15 +11,15 @@
 
     python tools/probe_channel_switch.py
 
-脚本会先等「有线配置通道出现」（最多 3 分钟），再等它消失（最多 2 分钟）。
-按提示插线、拔线即可。它打印每一次选择变化，最后给出判定：
+脚本等「有线配置通道出现」，打印 hub 的选择，然后结束。它验证的是**插线方向**：
+有线一出现，无线灯口关闭、有线接口接入。
 
-    有线出现 → 无线灯口关闭、有线接口接入   ✔
-    有线消失 → 无线灯口重新接入             ✔
+**拔线方向不在这里测**：假端口不发帧，永远不会「写失败」，也就不会进入 suspended。
+真端口每 0.5 秒写一帧，拔线后立刻失败 → suspended → 无线重建；这条路径由两个单测
+分别覆盖（test_keyboard.py 的写失败→suspended，test_keyboard_hub.py 的 suspended→无线回来）。
 
-如果插上线 3 分钟内都没看到「有线配置通道出现」，说明这把键盘的插线模式
-在这台机器上不是 VID 258A/PID 010C + usage FF00/0001 + 特征长度 520 的配置通道——
-那 #13 的「有线优先」就触发不了，需要先查清有线模式的真面目。
+如果插上线 3 分钟内都没看到「有线配置通道出现」，说明键盘没切到有线模式
+（85/86 这类键盘有 2.4G/有线拨杆，只插线不拨开关不会切）。
 """
 from __future__ import annotations
 
@@ -89,16 +89,22 @@ def tick(hub) -> None:
 def watch_until(hub, predicate, timeout: float, prompt: str) -> bool:
     start = time.monotonic()
     last_prompt = 0.0
+    last_beat = 0.0
     last_line = None
     while time.monotonic() - start < timeout:
         tick(hub)
         line = snapshot(hub)
+        now = time.monotonic()
         if line != last_line:
             print("  [%s] %s" % (time.strftime("%H:%M:%S"), line), flush=True)
             last_line = line
+            last_beat = now
+        elif now - last_beat >= 5.0:
+            # 5 秒一次心跳：证明有线通道是「一直在」还是「闪一下就没了」
+            print("  [%s] %s" % (time.strftime("%H:%M:%S"), line), flush=True)
+            last_beat = now
         if predicate():
             return True
-        now = time.monotonic()
         if now - last_prompt >= 15.0:
             last_prompt = now
             print("  %s（还剩 %.0f 秒）" % (prompt, timeout - (now - start)), flush=True)
@@ -136,21 +142,13 @@ def main() -> int:
     seen = snapshot(hub)
     print("  有线出现后的状态：%s" % seen)
     wireless_off = hub._wireless is None
-
-    print("\n第二步：请拔掉数据线（最多等 %.0f 秒）" % WAIT_GONE_S)
-    if not watch_until(hub, lambda: not wired_channel_present(), WAIT_GONE_S,
-                       "等拔线"):
-        print("  失败：等不到拔线")
-        return 1
-    if not watch_until(hub, lambda: hub._wireless is not None, 10.0, "等无线接管"):
-        print("  失败：拔线后无线灯口没有回来")
-        return 1
-    print("  拔线后的状态：%s" % snapshot(hub))
-
     hub.stop()
+
     print("\n结果：")
-    print("  %s 有线出现 → 无线灯口关闭" % ("通过" if wireless_off else "失败"))
-    print("  %s 有线消失 → 无线灯口回来" % "通过")
+    print("  %s 有线出现 → 无线灯口关闭、有线接口接入"
+          % ("通过" if wireless_off else "失败"))
+    print("  拔线方向由单测覆盖（真端口写失败 → suspended → 无线重建），"
+          "假端口在这里模拟不出来。")
     return 0 if wireless_off else 1
 
 
