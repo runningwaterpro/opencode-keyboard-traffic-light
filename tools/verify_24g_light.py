@@ -16,6 +16,8 @@
   A  亮/灭        键 1 亮绿 → 等限流放行 → 熄灭。人看灯即可。
   B  打字不出帧    持续打字 60 秒，断言「系统空闲 < 15 秒」时一帧都没发。
   C  停手自己回来  停手后键 3 亮绿，断言发帧那一刻空闲 ≥ 15 秒。
+  D  常亮十分钟    补帧长跑（issue #12）：每 35 秒一帧、链路不掉、灯不灭。
+                  单独跑：--phase d [--minutes 10]，'all' 不含 D（太长）。
 """
 from __future__ import annotations
 
@@ -45,9 +47,11 @@ class ReportingTransport(dongle.DongleTransport):
     def __init__(self):
         self.sent: list[float] = []
         self.last_buf = None
+        self.handle = None
 
     def open(self):
         handle = super().open()
+        self.handle = handle
         print("  接收器已打开：%s" % handle.path)
         return handle
 
@@ -56,6 +60,27 @@ class ReportingTransport(dongle.DongleTransport):
         self.sent.append(time.monotonic())
         self.last_buf = bytes(buf)
         print("  [%s] 已发一帧（第 %d 帧）" % (time.strftime("%H:%M:%S"), len(self.sent)))
+
+    def close(self, handle):
+        super().close(handle)
+        self.handle = None
+
+    def link_ok(self) -> bool | None:
+        """只读的链路检查：接收器有回包且键盘已连。None = 手里没有句柄。"""
+        handle = self.handle
+        if handle is None:
+            return None
+        try:
+            reply = handle.simple_command(dongle.CMD_GET_DONGLE_STATUS)
+        except Exception:
+            return False
+        return bool(reply and reply[4])
+
+
+def link_text(ok: bool | None) -> str:
+    if ok is None:
+        return "句柄未打开"
+    return "正常" if ok else "无回包/键盘未连"
 
 
 def describe(buf) -> str:
@@ -167,13 +192,59 @@ def phase_c(port, transport) -> bool:
     return False
 
 
+def phase_d(port, transport, minutes: float) -> bool:
+    """补帧长跑：每 35 秒一帧，帧间间隔始终小于灯 60 秒的寿命。"""
+    print("\nD 常亮：请离开键盘，别碰键盘和鼠标（%.0f 分钟）" % minutes)
+    print("  预期：键 1 常绿；每 35 秒黑约 1 秒后自己回来；不能整块灭掉")
+    port.apply([SetKeyLight("1", Light.IDLE), SetKeyLight("3", Light.OFF)])
+    initial = len(transport.sent)
+    start = time.monotonic()
+    last_report = start
+    last_send = None
+    seen = initial
+    gaps: list[float] = []
+    link_failures = 0
+    while time.monotonic() - start < minutes * 60.0:
+        port._step(time.monotonic())
+        now = time.monotonic()
+        while seen < len(transport.sent):          # 用真实发送时刻算间隔
+            sent_at = transport.sent[seen]
+            if last_send is not None:
+                gaps.append(sent_at - last_send)
+            last_send = sent_at
+            seen += 1
+        if now - last_report >= 60.0:
+            last_report = now
+            link = transport.link_ok()
+            if link is not True:
+                time.sleep(1.0)        # 可能正好撞上补帧，再确认一次
+                link = transport.link_ok()
+            if link is not True:
+                link_failures += 1
+            print("  [%s] %4.0f 分钟：补帧 %d 次，最大间隔 %.0f 秒，链路 %s"
+                  % (time.strftime("%H:%M:%S"), (now - start) / 60.0,
+                     len(transport.sent) - initial, max(gaps or [0]),
+                     link_text(link)))
+        time.sleep(STEP_S)
+
+    frames = len(transport.sent) - initial
+    gap_max = max(gaps or [0.0])
+    need = max(1, int(minutes * 60.0 / RESEND_S) - 2)
+    print("  %.0f 分钟：补帧 %d 次（至少应有 %d 次），最大间隔 %.0f 秒，"
+          "链路异常 %d 次" % (minutes, frames, need, gap_max, link_failures))
+    print("  ← 人看：键 1 全程亮，只在补帧时黑一下（约 1 秒）")
+    return frames >= need and gap_max <= 45.0 and link_failures == 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="2.4G 无线灯口真机验收")
-    ap.add_argument("--phase", choices=["a", "b", "c", "all"], default="all")
+    ap.add_argument("--phase", choices=["a", "b", "c", "d", "all"], default="all")
+    ap.add_argument("--minutes", type=float, default=10.0,
+                    help="D 阶段跑多久（分钟，默认 10）")
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="  %(levelname)s %(message)s")
-    print("2.4G 无线灯口真机验收（issue #11）")
+    print("2.4G 无线灯口真机验收（issue #11 / #12）")
     warn_if_cable_plugged()
 
     transport = ReportingTransport()
@@ -186,6 +257,9 @@ def main() -> int:
             results["B 打字不出帧"] = phase_b(port, transport)
         if args.phase in ("c", "all"):
             results["C 停手回来"] = phase_c(port, transport)
+        if args.phase == "d":
+            results["D 常亮 %.0f 分钟" % args.minutes] = phase_d(
+                port, transport, args.minutes)
     except KeyboardInterrupt:
         print("\n中断")
     finally:

@@ -80,6 +80,20 @@ def sent_times(transport):
     return [t for t, _ in transport.sent]
 
 
+STEP = 0.5          # 生产步长，长跑测试照它推进
+
+
+def run(port, world, start: float, seconds: float, idle=None) -> float:
+    """按生产步长推进 start..start+seconds；idle 可随时间变。返回最后一刻。"""
+    steps = int(round(seconds / STEP))
+    for i in range(steps + 1):
+        t = start + i * STEP
+        if idle is not None:
+            world.idle = idle(t)
+        step(port, world, t)
+    return start + steps * STEP
+
+
 # ---- 基本显示 ----
 
 def test_first_change_opens_and_sends_one_frame_after_merge_window():
@@ -337,6 +351,65 @@ def test_failure_does_not_lose_the_pending_light():
     buf = transport.sent[-1][1]
     assert color_of(buf, "1") == (0, 0, 0)
     assert color_of(buf, "3") == frame.COLORS[Light.IDLE]
+
+
+# ---- 长跑：十分钟常亮、三分钟打字、停手回来 ----
+
+def test_ten_minutes_keepalive_never_lets_the_light_die():
+    """人离开十分钟：每 35 秒补一帧，帧间最大间隔远小于灯 60 秒的寿命。"""
+    port, transport, world = make_port()
+    port.apply([SetKeyLight("1", Light.FAILED)])
+    run(port, world, 0.0, 600.0, idle=lambda t: 1000.0)
+
+    times = sent_times(transport)
+    assert times[0] == MERGE_S
+    assert len(times) == 18                      # 1 + 35k ≤ 600
+    gaps = [b - a for a, b in zip(times, times[1:])]
+    assert max(gaps) <= RESEND_S + 1e-9          # 35 秒一帧，绝不拖到 60 秒
+    assert len({buf for _t, buf in transport.sent}) == 1   # 内容始终一致
+
+
+def test_three_minutes_of_typing_sends_nothing_at_all():
+    """连续打字三分钟：零发帧、零闪烁（不打开设备、不写 HID）。"""
+    port, transport, world = make_port()
+    port.apply([SetKeyLight("1", Light.FAILED)])
+    step(port, world, 0.0)
+    step(port, world, 1.0)
+    assert sent_times(transport) == [1.0]
+
+    opens = len(transport.open_calls)
+    run(port, world, 2.0, 180.0, idle=lambda t: 2.0)
+    assert sent_times(transport) == [1.0]
+    assert len(transport.open_calls) == opens     # 连设备都不碰
+
+
+def test_frames_resume_within_15_seconds_after_typing_stops():
+    """停手 15 秒内灯自己回来：挂着的灯态在空闲满 15 秒那一刻发出。"""
+    port, transport, world = make_port()
+    port.apply([SetKeyLight("1", Light.FAILED)])
+    step(port, world, 0.0)
+    step(port, world, 1.0)
+
+    typed_until = 100.5
+    run(port, world, 2.0, typed_until - 2.0, idle=lambda t: 2.0)
+    assert sent_times(transport) == [1.0]
+
+    run(port, world, typed_until, 20.0, idle=lambda t: t - typed_until)
+    resume = [t for t in sent_times(transport) if t > 1.0]
+    assert len(resume) == 1
+    assert resume[0] - typed_until <= TYPING_IDLE_S + STEP
+    assert resume[0] - typed_until >= TYPING_IDLE_S   # 不满 15 秒绝不发
+
+
+def test_typing_burst_right_after_a_keepalive_does_not_flash():
+    """补帧后立刻开打：补帧不会因为「灯态没变」再发一遍。"""
+    port, transport, world = make_port()
+    port.apply([SetKeyLight("1", Light.IDLE)])
+    run(port, world, 0.0, 40.0, idle=lambda t: 1000.0)
+    assert len(sent_times(transport)) == 2        # 1 和 36 各一帧
+    before = len(transport.sent)
+    run(port, world, 40.5, 60.0, idle=lambda t: 1.0)
+    assert len(transport.sent) == before
 
 
 # ---- 生命周期 ----
