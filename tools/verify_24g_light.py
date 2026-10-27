@@ -10,14 +10,17 @@
     python tools/verify_24g_light.py            # 全流程，约 3 分钟
     python tools/verify_24g_light.py --phase a  # 只测亮/灭，约 50 秒
 
-前置条件：键盘切到 2.4G、**拔掉数据线**（插线后 2.4G 写入会 ACK 但不生效）。
+前置条件：键盘切到 2.4G、**拔掉数据线**。
+  “有没有插线”没法从设备树判断——这类 2.4G 接收器 VID/PID 都一样，机器上装两只
+  就常年在线两只设备树。判据只有一条：第一次补帧后键 1 有没有亮。没亮就是没切过去。
 
 阶段：
   A  亮/灭        键 1 亮绿 → 等限流放行 → 熄灭。人看灯即可。
   B  打字不出帧    持续打字 60 秒，断言「系统空闲 < 15 秒」时一帧都没发。
   C  停手自己回来  停手后键 3 亮绿，断言发帧那一刻空闲 ≥ 15 秒。
   D  常亮十分钟    补帧长跑（issue #12）：每 35 秒一帧、链路不掉、灯不灭。
-                  单独跑：--phase d [--minutes 10]，'all' 不含 D（太长）。
+                  单独跑：--phase d [--minutes 10] [--start-in 60]；
+                  'all' 不含 D（太长）。
 """
 from __future__ import annotations
 
@@ -29,7 +32,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from traffic_light import device, dongle, frame  # noqa: E402
+from traffic_light import dongle, frame  # noqa: E402
 from traffic_light.core import Light, SetKeyLight  # noqa: E402
 from traffic_light.wireless import (RESEND_S, STEP_S, TYPING_IDLE_S,  # noqa: E402
                                     WirelessLightPort, default_idle_seconds)
@@ -115,37 +118,22 @@ def pump_until_frame(port, transport, timeout: float, label: str) -> bool:
     return False
 
 
-def cable_plugged() -> bool:
-    """数据线是否还插着。
-
-    插线时键盘走有线通道，2.4G 写入会被接收器 ACK 但键盘不执行。
-    判据：出现了第二个 3554:FA09 键盘集合（接收器自己的那个是 21 字节输入）。
-    枚举失败按「没插」处理，不拦着用户跑。
-    """
-    try:
-        devices = device.list_devices()
-    except Exception:
-        return False
-    return any((info.vid, info.pid) == (dongle.VID_RECEIVER, dongle.PID_RECEIVER)
-               and info.usage_page == 0x01 and info.usage == 0x06
-               and info.input_length == 9 for info in devices)
-
-
-def warn_if_cable_plugged() -> None:
-    if cable_plugged():
-        print("  警告：发现第二个 3554:FA09 键盘集合，数据线可能还插着。")
-        print("        插线时 2.4G 写入会被 ACK，但键盘不执行，灯不会变。")
-
-
-def wait_until_unplugged(max_wait: float) -> bool:
-    """等数据线拔掉再开始计时；超时返回 False。"""
+def countdown(seconds: float) -> None:
+    """倒计时：留出离开键盘的时间。每 10 秒报一次，别刷屏。"""
+    if seconds <= 0:
+        return
+    print("  %.0f 秒后开始计时，现在把键盘和鼠标放开…" % seconds)
     start = time.monotonic()
-    while time.monotonic() - start < max_wait:
-        if not cable_plugged():
-            return True
-        print("  数据线还插着，等它拔掉（最多等 %.0f 秒）…" % max_wait, flush=True)
-        time.sleep(2.0)
-    return False
+    marker = int(seconds) // 10
+    while True:
+        left = seconds - (time.monotonic() - start)
+        if left <= 0:
+            break
+        if int(left) // 10 != marker:
+            marker = int(left) // 10
+            print("  还有 %d 秒" % (marker * 10), flush=True)
+        time.sleep(0.5)
+    print("  开始。", flush=True)
 
 
 def phase_a(port, transport) -> bool:
@@ -210,13 +198,12 @@ def phase_c(port, transport) -> bool:
     return False
 
 
-def phase_d(port, transport, minutes: float) -> bool:
+def phase_d(port, transport, minutes: float, start_in: float = 0.0) -> bool:
     """补帧长跑：每 35 秒一帧，帧间间隔始终小于灯 60 秒的寿命。"""
     print("\nD 常亮：请离开键盘，别碰键盘和鼠标（%.0f 分钟）" % minutes)
     print("  预期：键 1 常绿；每 35 秒黑约 1 秒后自己回来；不能整块灭掉")
-    if not wait_until_unplugged(600.0):
-        print("  数据线一直没拔：插线时 2.4G 写入不生效，本轮无法验收")
-        return False
+    print("  前提：键盘在 2.4G、数据线已拔。第一次补帧后灯没亮就是还没切过去。")
+    countdown(start_in)
     port.apply([SetKeyLight("1", Light.IDLE), SetKeyLight("3", Light.OFF)])
     initial = len(transport.sent)
     start = time.monotonic()
@@ -262,11 +249,13 @@ def main() -> int:
     ap.add_argument("--phase", choices=["a", "b", "c", "d", "all"], default="all")
     ap.add_argument("--minutes", type=float, default=10.0,
                     help="D 阶段跑多久（分钟，默认 10）")
+    ap.add_argument("--start-in", type=float, default=30.0,
+                    help="D 阶段开始前留给你离开键盘的秒数（默认 30）")
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="  %(levelname)s %(message)s")
     print("2.4G 无线灯口真机验收（issue #11 / #12）")
-    warn_if_cable_plugged()
+    print("  键盘需切到 2.4G 且数据线已拔；灯亮不亮是唯一判据。")
 
     transport = ReportingTransport()
     port = WirelessLightPort(logging.getLogger("verify"), transport=transport)
@@ -280,7 +269,7 @@ def main() -> int:
             results["C 停手回来"] = phase_c(port, transport)
         if args.phase == "d":
             results["D 常亮 %.0f 分钟" % args.minutes] = phase_d(
-                port, transport, args.minutes)
+                port, transport, args.minutes, args.start_in)
     except KeyboardInterrupt:
         print("\n中断")
     finally:
