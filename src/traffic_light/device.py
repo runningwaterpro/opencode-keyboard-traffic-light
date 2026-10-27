@@ -311,7 +311,7 @@ def detect_mode(devices: list[HidDeviceInfo] | None = None) -> str:
 def open_exclusive(info: HidDeviceInfo) -> int:
     """独占打开配置通道，返回句柄；失败抛 DeviceError。
 
-    share=0：官方程序或 SignalRGB 持有时抢不到，直接报错，不抢占、不重试。
+    share=0：官方程序持有时抢不到，直接报错，不抢占、不重试。
     打开前重做一遍六项复核：绝不把句柄交到没确认过的集合上。
     """
     ok, reason = validate_channel(info)
@@ -320,7 +320,7 @@ def open_exclusive(info: HidDeviceInfo) -> int:
     handle = kernel32.CreateFileW(info.path, GENERIC_READ | GENERIC_WRITE, 0, None,
                                   OPEN_EXISTING, 0, None)
     if not handle or handle == INVALID_HANDLE_VALUE:
-        raise DeviceError("独占打开失败（可能被官方程序或 SignalRGB 占用）：%s；%s"
+        raise DeviceError("独占打开失败（可能被官方程序或其他灯效软件占用）：%s；%s"
                           % (info.path, ctypes.WinError(ctypes.get_last_error())))
     return handle
 
