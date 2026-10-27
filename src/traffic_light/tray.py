@@ -98,12 +98,35 @@ BLINK_TIMER_ID = 1
 BLINK_INTERVAL_MS = 500
 
 MF_STRING = 0x0
+MF_GRAYED = 0x00000001
+MF_CHECKED = 0x00000008
 MF_SEPARATOR = 0x0800
 TPM_RIGHTBUTTON = 0x0002
 TPM_BOTTOMALIGN = 0x0020
-ID_QUIT, ID_LOG, ID_OPENCODE = 1001, 1002, 1003
+ID_QUIT, ID_LOG, ID_OPENCODE, ID_WIRELESS = 1001, 1002, 1003, 1004
 IDC_ARROW = 32512
 ERROR_CLASS_ALREADY_EXISTS = 1410
+
+MENU_WIRELESS = "无线键盘也亮灯"
+MENU_WIRELESS_HINT = "打字时不发帧，避免吞键"
+
+
+def menu_spec(wireless_light: bool) -> list[tuple[int, int, str | None]]:
+    """右键菜单的项列表：(flags, id, text)。纯逻辑，离线可测。
+
+    顺序即菜单顺序：开关和它的说明在最上面，退出固定在最后。
+    灰掉的说明项 id 为 0，点了也不会有命令。
+    """
+    wireless_flags = MF_STRING | (MF_CHECKED if wireless_light else 0)
+    return [
+        (wireless_flags, ID_WIRELESS, MENU_WIRELESS),
+        (MF_STRING | MF_GRAYED, 0, MENU_WIRELESS_HINT),
+        (MF_SEPARATOR, 0, None),
+        (MF_STRING, ID_LOG, "打开日志"),
+        (MF_STRING, ID_OPENCODE, "打开 OpenCode"),
+        (MF_SEPARATOR, 0, None),
+        (MF_STRING, ID_QUIT, "退出"),
+    ]
 
 LRESULT = ctypes.c_ssize_t
 WNDPROC = ctypes.WINFUNCTYPE(LRESULT, wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM)
@@ -244,7 +267,8 @@ class TrayIcon:
     _CB_MSG = WM_APP + 3
 
     def __init__(self, log: logging.Logger, *, on_quit, log_path=None,
-                 open_target: str = "opencode://", dry_run: bool = False):
+                 open_target: str = "opencode://", dry_run: bool = False,
+                 wireless_light: bool = True):
         self._log = log
         self._on_quit = on_quit
         self._log_path = str(log_path) if log_path else None
@@ -255,6 +279,8 @@ class TrayIcon:
         self._pending = {"light": Light.OFF, "sessions": 0, "keyboards": 0,
                          "connected": False}
         self._balloons: list[tuple[str, str, str]] = []
+        self._wireless_light = bool(wireless_light)
+        self._on_wireless_toggle = None
 
         self._hwnd = None
         self._thread: threading.Thread | None = None
@@ -272,6 +298,24 @@ class TrayIcon:
     @property
     def available(self) -> bool:
         return self._added
+
+    @property
+    def wireless_light(self) -> bool:
+        """当前是否接管无线键盘（菜单勾选状态）。"""
+        with self._lock:
+            return self._wireless_light
+
+    def set_wireless_light(self, enabled: bool) -> None:
+        """更新勾选状态（菜单每次打开都重建，所以不需要重画）。"""
+        with self._lock:
+            self._wireless_light = bool(enabled)
+
+    def set_on_wireless_toggle(self, callback) -> None:
+        """挂上开关回调：点击菜单项时回调收到「新状态」。
+
+        单独设而不是构造参数：守护要等键盘中枢建好才知道往哪儿转。
+        """
+        self._on_wireless_toggle = callback
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -478,10 +522,8 @@ class TrayIcon:
         user32.CreatePopupMenu.restype = wt.HANDLE
         menu = user32.CreatePopupMenu()
         user32.AppendMenuW.argtypes = [wt.HANDLE, wt.UINT, ctypes.c_size_t, wt.LPCWSTR]
-        user32.AppendMenuW(menu, MF_STRING, ID_LOG, "打开日志")
-        user32.AppendMenuW(menu, MF_STRING, ID_OPENCODE, "打开 OpenCode")
-        user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
-        user32.AppendMenuW(menu, MF_STRING, ID_QUIT, "退出")
+        for flags, item_id, text in menu_spec(self.wireless_light):
+            user32.AppendMenuW(menu, flags, item_id, text)
 
         pt = wt.POINT()
         user32.GetCursorPos(ctypes.byref(pt))
@@ -504,6 +546,19 @@ class TrayIcon:
             self._open(self._log_path)
         elif cmd == ID_OPENCODE:
             self._open(self._open_target)
+        elif cmd == ID_WIRELESS:
+            self._toggle_wireless()
+
+    def _toggle_wireless(self) -> None:
+        """菜单点击：先翻本地勾选状态，再把新状态交给守护。"""
+        enabled = not self.wireless_light
+        self.set_wireless_light(enabled)
+        self._log.info("托盘开关：无线键盘也亮灯 → %s", "开" if enabled else "关")
+        if self._on_wireless_toggle is not None:
+            try:
+                self._on_wireless_toggle(enabled)
+            except Exception:
+                self._log.warning("无线接管开关回调失败", exc_info=True)
 
     def _open(self, target) -> None:
         if not target:

@@ -59,6 +59,14 @@ def test_cable_ignores_slot(slot):
     assert head == "键盘需要有线连接"
 
 
+def test_wireless_tip_has_fixed_title_and_body():
+    """一次性说明：标题就说事，正文写清「打字时不发帧」和怎么关。"""
+    head, body = format_notify(NotifyRequest(kind="wireless_tip"))
+    assert head == "无线键盘也会亮灯"
+    assert "打字时不发帧" in body
+    assert "托盘菜单" in body
+
+
 def test_body_project_and_title():
     _, body = format_notify(NotifyRequest(kind="completed", project="demo", title="会话一"))
     assert body == "demo — 会话一"

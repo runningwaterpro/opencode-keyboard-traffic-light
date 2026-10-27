@@ -37,7 +37,7 @@ class KeyboardHub:
                  profile_list=None, on_wired_needed=None, fps: int = 20,
                  clock=time.monotonic, reconcile_interval: float = 2.0,
                  port_factory=None, wireless_factory=None,
-                 wireless_enabled: bool = True):
+                 wireless_enabled: bool = True, on_wireless_active=None):
         self._log = log
         self._profile_names = list(profile_names) if profile_names else None
         self._profile_list = profile_list
@@ -48,6 +48,7 @@ class KeyboardHub:
         self._port_factory = port_factory or self._make_port
         self._wireless_factory = wireless_factory or self._make_wireless
         self._wireless_enabled = wireless_enabled
+        self._on_wireless_active = on_wireless_active
         self._wireless = None
 
         self._lock = threading.Lock()
@@ -111,6 +112,17 @@ class KeyboardHub:
         if self._wireless is not None and self._wireless.state == "open":
             count += 1
         return count
+
+    def set_wireless_enabled(self, enabled: bool) -> None:
+        """托盘开关：关掉时立刻停无线灯口，下一次调度不再建。
+
+        开着不做任何事：等调度线程自己按「只有接收器」去建，避免在开关回调里
+        跑设备枚举。调用方可以来自托盘线程，所以这里只改标志 + 停端口。
+        """
+        self._wireless_enabled = bool(enabled)
+        if not self._wireless_enabled:
+            self._drop_wireless()
+        self._log.info("无线接管：%s", "开启" if self._wireless_enabled else "关闭")
 
     # ---- 调度线程 ----
 
@@ -212,7 +224,7 @@ class KeyboardHub:
         return mode
 
     def _ensure_wireless(self) -> None:
-        if self._wireless is not None:
+        if not self._wireless_enabled or self._wireless is not None:
             return
         try:
             port = self._wireless_factory()
@@ -230,6 +242,11 @@ class KeyboardHub:
             port.apply([SetKeyLight(key=k, light=v) for k, v in lights.items()])
         port.start()
         self._log.info("无线键盘接管灯光（2.4G）")
+        if self._on_wireless_active is not None:
+            try:
+                self._on_wireless_active()
+            except Exception:
+                self._log.debug("on_wireless_active 回调失败", exc_info=True)
 
     def _drop_wireless(self) -> None:
         port, self._wireless = self._wireless, None

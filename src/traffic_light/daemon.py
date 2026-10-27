@@ -15,6 +15,7 @@ from . import core
 from . import notify as notify_mod
 from . import profiles
 from . import runtime
+from . import settings as settings_mod
 from . import tray as tray_mod
 from .core import GuardState
 from .discovery import (ServiceFileError, ServiceInfo, StaleServiceError,
@@ -187,6 +188,33 @@ def _session_loop(info: ServiceInfo, state: GuardState,
     return connected
 
 
+def make_wireless_notice(settings, store, notifier):
+    """一次性说明：只弹第一次，弹过就记进设置里（重启不再打扰）。"""
+    def notice() -> None:
+        if settings.wireless_notice_shown:
+            return
+        settings.wireless_notice_shown = True
+        store.save(settings)
+        notifier.send(notify_mod.NotifyRequest(kind="wireless_tip"))
+    return notice
+
+
+def make_wireless_toggle(settings, store, light, notice):
+    """托盘开关：先存盘，再切通道；打开时补一次说明。
+
+    存盘在前：哪怕后面切通道抛异常，用户的选择也不会丢。
+    """
+    def toggle(enabled: bool) -> None:
+        settings.wireless_light = enabled
+        store.save(settings)
+        setter = getattr(light, "set_wireless_enabled", None)
+        if setter is not None:
+            setter(enabled)
+        if enabled:
+            notice()
+    return toggle
+
+
 def run(service_json: str | Path, verbose: bool = False, dry_run: bool = False,
         profile_name: str = "auto", use_tray: bool = True) -> int:
     """跑守护主循环。Ctrl+C 退出；dry_run 只写日志、不碰键盘、不发通知。"""
@@ -199,17 +227,22 @@ def run(service_json: str | Path, verbose: bool = False, dry_run: bool = False,
     service_json = Path(service_json)
     stop = threading.Event()
     state = GuardState()
+    store = settings_mod.SettingsStore(
+        runtime.DEFAULT_LOG_DIR / settings_mod.SETTINGS_FILE_NAME, _log)
+    settings = store.load()
     tray = None
     if use_tray:
         tray = tray_mod.TrayIcon(
             _log, on_quit=stop.set,
             log_path=runtime.DEFAULT_LOG_DIR / runtime.LOG_FILE_NAME,
-            dry_run=dry_run)
+            dry_run=dry_run, wireless_light=settings.wireless_light)
         tray.start()
         if not tray.available:
             tray = None
     notifier = notify_mod.create_notifier(
         dry_run, _log, balloon=tray.balloon if tray is not None else None)
+    maybe_wireless_notice = make_wireless_notice(settings, store, notifier)
+
     if dry_run:
         light = DryRunLightPort(_log)
     else:
@@ -217,8 +250,14 @@ def run(service_json: str | Path, verbose: bool = False, dry_run: bool = False,
         light = KeyboardHub(
             _log, profile_names=names,
             on_wired_needed=lambda: notifier.send(notify_mod.NotifyRequest(kind="cable")),
+            wireless_enabled=settings.wireless_light,
+            on_wireless_active=maybe_wireless_notice,
         )
         light.start()
+
+    if tray is not None:
+        tray.set_on_wireless_toggle(
+            make_wireless_toggle(settings, store, light, maybe_wireless_notice))
     _pump(tray, state, light, False)
     attempt = 0
     try:

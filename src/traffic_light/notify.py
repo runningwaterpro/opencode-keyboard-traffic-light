@@ -17,6 +17,8 @@ _PREFIX = {
     "interrupted": "中断",
 }
 _CABLE_TITLE = "键盘需要有线连接"
+_TIP_TITLE = "无线键盘也会亮灯"
+_TIP_BODY = "打字时不发帧，避免吞键。可在托盘菜单「无线键盘也亮灯」里关掉。"
 _APP_ID = "OpenCode 状态灯"
 _SHORT_ID_LEN = 12
 _MISSING_WINOTIFY = "未安装 winotify，通知降级为日志"
@@ -36,6 +38,8 @@ class NotifyRequest:
 
 def format_notify(req: NotifyRequest) -> tuple[str, str]:
     """返回 (标题, 正文)。"""
+    if req.kind == "wireless_tip":
+        return _TIP_TITLE, _TIP_BODY
     if req.kind == "cable":
         head = _CABLE_TITLE
     else:

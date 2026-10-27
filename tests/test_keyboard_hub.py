@@ -276,6 +276,86 @@ def test_wireless_stays_off_while_wired_is_present():
     assert set(ports) == {"p1"}
 
 
+def test_wired_takes_over_and_replays_the_current_lights():
+    """#13 有线出现 → 切走：无线停、有线起，且拿到的是当前灯态（不错灯）。"""
+    profile = FakeProfile([])
+    profile.mode = "2.4g"
+    hub, ports, wireless = make_wireless_hub(profile)
+    hub.apply([SetKeyLight("1", Light.FAILED)])
+    hub._reconcile(0.0)
+    assert wireless[0].applied == [SetKeyLight("1", Light.FAILED)]
+
+    hub.apply([SetKeyLight("2", Light.WAITING)])
+    profile.mode = "wired"
+    profile.infos = [info("p1")]
+    hub._reconcile(2.0)
+
+    assert wireless[0].stopped
+    assert hub._wireless is None
+    assert ports["p1"].started
+    assert ports["p1"].applied == [SetKeyLight("1", Light.FAILED),
+                                   SetKeyLight("2", Light.WAITING)]
+
+
+def test_cable_out_returns_to_wireless_with_the_latest_lights():
+    """#13 有线消失 → 切回：有线口挂掉后无线回来，并重放最新灯态。"""
+    profile = FakeProfile([info("p1")])
+    profile.mode = "wired"
+    hub, ports, wireless = make_wireless_hub(profile)
+    hub.apply([SetKeyLight("1", Light.IDLE)])
+    hub._reconcile(0.0)
+    assert ports["p1"].started
+
+    ports["p1"].state = "suspended"          # 拔线后发帧失败的样子
+    hub.apply([SetKeyLight("3", Light.FAILED)])
+    profile.mode = "2.4g"
+    profile.infos = []
+    hub._reconcile(2.0)
+
+    assert len(wireless) == 1
+    assert wireless[0].started
+    assert wireless[0].applied == [SetKeyLight("1", Light.IDLE),
+                                  SetKeyLight("3", Light.FAILED)]
+
+
+def test_set_wireless_enabled_false_stops_and_blocks_the_port():
+    """托盘关掉：立刻停；之后不再建。再打开：下一次调度就建回来。"""
+    profile = FakeProfile([])
+    profile.mode = "2.4g"
+    hub, _ports, wireless = make_wireless_hub(profile)
+    hub._reconcile(0.0)
+    assert len(wireless) == 1
+
+    hub.set_wireless_enabled(False)
+    assert wireless[0].stopped
+    assert hub._wireless is None
+    for t in (2.0, 4.0):
+        hub._reconcile(t)
+    assert len(wireless) == 1                # 关了就不建
+
+    hub.set_wireless_enabled(True)
+    hub._reconcile(6.0)
+    assert len(wireless) == 2
+    assert wireless[1].started
+
+
+def test_wireless_active_callback_fires_when_port_takes_over():
+    profile = FakeProfile([])
+    profile.mode = "2.4g"
+    calls = []
+    hub, _ports, _wireless = make_wireless_hub(
+        profile, on_wireless_active=lambda: calls.append(1))
+    hub._reconcile(0.0)
+    hub._reconcile(2.0)
+    assert calls == [1]                      # 每个灯口只报一次
+
+    hub.set_wireless_enabled(False)
+    hub._reconcile(4.0)
+    hub.set_wireless_enabled(True)
+    hub._reconcile(6.0)
+    assert calls == [1, 1]                   # 重新接管算新的一次
+
+
 def test_detect_error_does_not_tear_down_wireless():
     """枚举失败不是设备事实：已建好的无线灯口不许拆，否则每 2 秒重建一次。"""
     profile = FakeProfile([])
