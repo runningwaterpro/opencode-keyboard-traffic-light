@@ -26,6 +26,7 @@ from .core import Light, SetKeyLight
 # 所以有线必须持续刷新；取 0.5 秒留两倍余量，把 20 fps 的写入降到 2 Hz。
 # ponytail: 若哪天换成真的能保持画面的通道，这个值可以放大到分钟级。
 STATIC_REFRESH_S = 0.5
+STATIC_TICK_S = 0.25      # 静态时状态机多久走一步（呼吸时用 1/fps）
 
 
 class KeyboardLightPort:
@@ -107,10 +108,17 @@ class KeyboardLightPort:
     # ---- 后台循环与状态机 ----
 
     def _run(self) -> None:
-        interval = 1.0 / self._fps
         while not self._stop.is_set():
             self._step(self._clock())
-            self._stop.wait(interval)
+            # 只有黄在呼吸时才需要 20 fps 的节奏；静态时 4 Hz 足够（重发只按 0.5 秒）。
+            self._stop.wait(1.0 / self._fps if self._breathing() else STATIC_TICK_S)
+
+    def _breathing(self) -> bool:
+        """当前是否有黄色灯态在呼吸（决定要不要跑满 fps）。"""
+        if not self._profile.capability.breathing:
+            return False
+        with self._lock:
+            return any(lv is Light.WAITING for lv in self._lights.values())
 
     def _step(self, now: float) -> None:
         """单步状态机：_run 每 1/fps 秒调一次；测试注入 now 直接驱动。"""
