@@ -49,9 +49,13 @@ BLANK = bytes(dongle.COLOR_LEN)
 
 
 def default_idle_seconds() -> float:
-    """生产环境的空闲时间源；延迟导入，纯逻辑测试不会碰 Win32。"""
+    """生产环境的空闲时间源；延迟导入，纯逻辑测试不会碰 Win32。
+
+    用 keyboard_idle_seconds 而不是 idle_seconds：后者把鼠标也算进去，
+    用户用鼠标看网页时它永远小于阈值，60 秒的绿灯会整个错过。
+    """
     from . import useractivity
-    return useractivity.idle_seconds()
+    return useractivity.keyboard_idle_seconds()
 
 
 def render_lights(lights: dict[str, Light]) -> bytes:
@@ -176,10 +180,15 @@ class WirelessLightPort:
             if now - self._sent_at < RESEND_S:
                 return "未到补帧周期"
         else:
-            if now - self._changed_at < MERGE_S:
+            # 变化帧只等合并窗口，不吃 35 秒补帧限流：
+            # 丢键只发生在「发帧时人正在打字」，而打字门控已经挡住了这种情况，
+            # 变化帧再等 35 秒买不到任何安全性，只会让绿灯晚灭、黄灯晚亮。
+            # 但合并窗口对「从未发过帧」的第一次变化同样生效（_sent_at 是 -inf）。
+            in_merge = now - self._changed_at < MERGE_S
+            recently_sent = (self._sent_at == float("-inf")
+                             or now - self._sent_at < MERGE_S)
+            if in_merge and recently_sent:
                 return "合并窗口"
-            if now - self._sent_at < RESEND_S:
-                return "未到补帧周期"
         if self._idle() < TYPING_IDLE_S:
             return "打字中"
         return None

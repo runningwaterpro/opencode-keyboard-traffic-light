@@ -150,17 +150,13 @@ def test_turning_off_sends_one_black_frame_then_stops():
     step(port, world, 1.0)
 
     port.apply([SetKeyLight("1", Light.OFF)])
-    step(port, world, 2.0)               # 合并窗口内
-    step(port, world, RESEND_S + 0.9)    # 限流还没满
-    assert sent_times(transport) == [1.0]
-
-    step(port, world, RESEND_S + 1.0)    # 满 35 秒才允许下一帧
-    assert sent_times(transport) == [1.0, RESEND_S + 1.0]
+    step(port, world, 2.0)               # 变化帧不吃 35 秒限流：距上次发帧已满 1 秒，立刻发
+    assert sent_times(transport) == [1.0, 2.0]
     assert transport.sent[-1][1] == BLANK
 
     for t in (100.0, 1000.0):            # 全灭之后不再补帧
         step(port, world, t)
-    assert sent_times(transport) == [1.0, RESEND_S + 1.0]
+    assert sent_times(transport) == [1.0, 2.0]
 
 
 # ---- 打字门控（硬约束：15 秒内一帧都不发） ----
@@ -252,23 +248,45 @@ def test_changes_within_one_second_become_one_frame():
     assert color_of(transport.sent[0][1], "1") == frame.COLORS[Light.WAITING]
 
 
-def test_new_state_waits_for_the_resend_interval():
-    """限流：一帧之后 35 秒内不再发，哪怕灯态变了。"""
+def test_new_state_goes_out_right_after_the_merge_window():
+    """变化帧不等补帧周期：绿灯该灭就灭，最多等 1 秒合并窗口。
+
+    真机复现过的缺陷：会话完成亮绿后重新开跑，绿灯拖了 35 秒才灭——
+    因为 35 秒限流把「变化帧」也挡住了。丢键风险由打字门控负责，
+    限流只该管「内容没变」的补帧。
+    """
     port, transport, world = make_port()
     port.apply([SetKeyLight("1", Light.FAILED)])
     step(port, world, 0.0)
     step(port, world, 1.0)
-
-    port.apply([SetKeyLight("1", Light.OFF), SetKeyLight("2", Light.IDLE)])
-    step(port, world, 20.0)
-    step(port, world, RESEND_S + 0.9)    # 34.9 秒
     assert sent_times(transport) == [1.0]
 
-    step(port, world, RESEND_S + 1.0)    # 恰好 35 秒
-    assert sent_times(transport) == [1.0, RESEND_S + 1.0]
+    port.apply([SetKeyLight("1", Light.OFF), SetKeyLight("2", Light.IDLE)])
+    step(port, world, 20.0)              # 变化后 0 秒：合并窗口内？
+    assert sent_times(transport) == [1.0, 20.0]   # 不在窗口内（距上次发帧 19 秒），立刻发
     buf = transport.sent[-1][1]
     assert color_of(buf, "1") == (0, 0, 0)
     assert color_of(buf, "2") == frame.COLORS[Light.IDLE]
+
+
+def test_rapid_changes_are_still_capped_at_one_frame_per_second():
+    """变化帧不吃 35 秒限流，但也不许连发：1 秒内多次变化只出 1 帧。"""
+    port, transport, world = make_port()
+    port.apply([SetKeyLight("1", Light.FAILED)])
+    step(port, world, 0.0)
+    step(port, world, 1.0)
+    assert sent_times(transport) == [1.0]
+
+    port.apply([SetKeyLight("1", Light.OFF), SetKeyLight("2", Light.IDLE)])
+    step(port, world, 20.0)
+    assert sent_times(transport) == [1.0, 20.0]
+
+    port.apply([SetKeyLight("2", Light.OFF), SetKeyLight("3", Light.WAITING)])
+    step(port, world, 20.5)              # 距上次发帧 0.5 秒：合并窗口内
+    assert sent_times(transport) == [1.0, 20.0]
+    step(port, world, 21.0)              # 满 1 秒
+    assert sent_times(transport) == [1.0, 20.0, 21.0]
+    assert color_of(transport.sent[-1][1], "3") == frame.COLORS[Light.WAITING]
 
 
 def test_static_colors_are_resent_every_35_seconds():
